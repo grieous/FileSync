@@ -6,6 +6,43 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sync_core::Filter;
+
+/// 同步方向。语义与同类产品一致：只约束**本机允许的动作**。
+///
+/// - `Bidirectional`：既推也拉（常规用法，两端都设这个）
+/// - `UploadOnly`：只把本机变更推给对方，不接受对方变更
+/// - `DownloadOnly`：只接受对方变更，不推自己的
+///
+/// 单向场景要两端配合：发送端设 `UploadOnly`，接收端设 `DownloadOnly`。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncMode {
+    #[default]
+    Bidirectional,
+    UploadOnly,
+    DownloadOnly,
+}
+
+impl SyncMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            SyncMode::Bidirectional => "双向同步",
+            SyncMode::UploadOnly => "仅上传（本机 → 对端）",
+            SyncMode::DownloadOnly => "仅下载（对端 → 本机）",
+        }
+    }
+
+    /// 允许把本机变更推出去
+    pub fn allows_push(self) -> bool {
+        !matches!(self, SyncMode::DownloadOnly)
+    }
+
+    /// 允许把对端变更拉到本机（含删除传播）
+    pub fn allows_pull(self) -> bool {
+        !matches!(self, SyncMode::UploadOnly)
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
@@ -17,6 +54,12 @@ pub struct Config {
     pub workspace: String,
     /// 同步目录（绝对路径）
     pub root: String,
+    /// 同步方向。旧配置文件里没有这一项，缺省为双向。
+    #[serde(default)]
+    pub mode: SyncMode,
+    /// 过滤规则。两端必须一致，否则会互相误判删除。
+    #[serde(default)]
+    pub filter: Filter,
 }
 
 impl Default for Config {
@@ -26,6 +69,8 @@ impl Default for Config {
             token: String::new(),
             workspace: "default".to_string(),
             root: String::new(),
+            mode: SyncMode::default(),
+            filter: Filter::default(),
         }
     }
 }

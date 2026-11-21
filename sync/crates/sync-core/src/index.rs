@@ -13,6 +13,7 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use sync_proto::{IndexEntry, Kind};
 use walkdir::WalkDir;
 
@@ -39,12 +40,111 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+/// 扫描时的过滤规则。语义与同类同步工具一致：
+/// 被过滤的路径在两端都"不存在"，因此永远不会参与差异计算。
+///
+/// 重要：**两台设备必须配置同一套规则**。否则一方忽略的文件，在另一方看来
+/// 就是"被删除了"，会把删除操作传播回去。会话开始时会比对签名并拒绝不一致的组合。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Filter {
+    /// 忽略 `.` 开头的文件和目录（`.git`、`.DS_Store` 等）
+    #[serde(default)]
+    pub ignore_dotfiles: bool,
+    /// 忽略的扩展名，不带点，大小写不敏感
+    #[serde(default)]
+    pub ignore_extensions: Vec<String>,
+    /// 小于该大小的文件跳过（字节）
+    #[serde(default)]
+    pub size_min: Option<u64>,
+    /// 大于该大小的文件跳过（字节）
+    #[serde(default)]
+    pub size_max: Option<u64>,
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        // 默认不过滤任何东西。开启过滤会让已有共识失效，
+        // 必须由用户显式选择，不能升级后悄悄生效。
+        Self {
+            ignore_dotfiles: false,
+            ignore_extensions: Vec::new(),
+            size_min: None,
+            size_max: None,
+        }
+    }
+}
+
+impl Filter {
+    pub fn is_empty(&self) -> bool {
+        !self.ignore_dotfiles
+            && self.ignore_extensions.is_empty()
+            && self.size_min.is_none()
+            && self.size_max.is_none()
+    }
+
+    /// 规范化签名，用于两端比对。扩展名排序去重，保证等价配置得到相同字符串。
+    pub fn signature(&self) -> String {
+        let mut ext: Vec<String> = self
+            .ignore_extensions
+            .iter()
+            .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|e| !e.is_empty())
+            .collect();
+        ext.sort();
+        ext.dedup();
+        format!(
+            "dot={};ext={};min={};max={}",
+            self.ignore_dotfiles as u8,
+            ext.join(","),
+            self.size_min.map(|v| v.to_string()).unwrap_or_default(),
+            self.size_max.map(|v| v.to_string()).unwrap_or_default()
+        )
+    }
+
+    fn ext_matches(&self, name: &str) -> bool {
+        let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) else {
+            return false;
+        };
+        let ext = ext.to_ascii_lowercase();
+        self.ignore_extensions
+            .iter()
+            .any(|e| e.trim().trim_start_matches('.').to_ascii_lowercase() == ext)
+    }
+
+    /// 相对路径中任一层以 `.` 开头就整枝跳过。
+    fn dot_component(&self, rel: &str) -> bool {
+        rel.split('/').any(|c| c.starts_with('.') && c != "." && c != "..")
+    }
+}
+
 /// 递归扫描目录，产出索引。无法读取的条目跳过并告警，不中断整体扫描。
 pub fn scan(root: &Path) -> Result<Vec<IndexEntry>> {
+    scan_with(root, &Filter::default())
+}
+
+/// 带过滤规则的扫描。
+pub fn scan_with(root: &Path, filter: &Filter) -> Result<Vec<IndexEntry>> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut out = Vec::new();
+    let mut skipped = 0usize;
 
-    for item in WalkDir::new(&root).follow_links(false).sort_by_file_name() {
+    for item in WalkDir::new(&root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        // 目录级剪枝：点开头的一整枝都不必遍历（.git 动辄几万文件）
+        .filter_entry(|e| {
+            if !filter.ignore_dotfiles {
+                return true;
+            }
+            let p = e.path();
+            if p == root {
+                return true;
+            }
+            let rel = to_rel(&root, p);
+            !filter.dot_component(&rel)
+        })
+    {
         let item = match item {
             Ok(i) => i,
             Err(e) => {
@@ -66,6 +166,30 @@ pub fn scan(root: &Path) -> Result<Vec<IndexEntry>> {
         };
 
         let is_dir = md.is_dir();
+
+        if !is_dir {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            // 传输中途的临时文件永远不该进索引
+            if name.ends_with(".synctmp") {
+                skipped += 1;
+                continue;
+            }
+            if filter.ext_matches(&name) {
+                skipped += 1;
+                continue;
+            }
+            let size = md.len();
+            if filter.size_min.is_some_and(|v| size < v) || filter.size_max.is_some_and(|v| size > v)
+            {
+                skipped += 1;
+                continue;
+            }
+        }
+
         let digest = if is_dir {
             String::new()
         } else {
@@ -95,6 +219,9 @@ pub fn scan(root: &Path) -> Result<Vec<IndexEntry>> {
         });
     }
 
+    if skipped > 0 {
+        tracing::info!("按过滤规则跳过 {skipped} 个文件");
+    }
     Ok(out)
 }
 
@@ -298,5 +425,73 @@ mod tests {
         let local = map(vec![f("a", "1")]);
         let remote = map(vec![f("a", "1")]);
         assert!(diff(&base, &local, &remote).is_empty());
+    }
+
+    // ---- 过滤规则 ----
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("winsync-filter-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn filter_skips_dotfiles_and_extensions() {
+        let root = tmpdir("dot");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/config"), b"x").unwrap();
+        std::fs::write(root.join(".env"), b"secret").unwrap();
+        std::fs::write(root.join("a.txt"), b"aaa").unwrap();
+        std::fs::write(root.join("setup.LNK"), b"lnk").unwrap();
+
+        let all = scan_with(&root, &Filter::default()).unwrap();
+        let names: Vec<&str> = all.iter().map(|e| e.path.as_str()).collect();
+        assert!(names.contains(&".env"));
+        assert!(names.contains(&"setup.LNK"));
+
+        let filter = Filter {
+            ignore_dotfiles: true,
+            ignore_extensions: vec!["lnk".into()],
+            ..Default::default()
+        };
+        let kept = scan_with(&root, &filter).unwrap();
+        let names: Vec<&str> = kept.iter().map(|e| e.path.as_str()).collect();
+        assert!(!names.iter().any(|n| n.starts_with('.')));
+        assert!(!names.contains(&"setup.LNK"));
+        assert!(names.contains(&"a.txt"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn filter_respects_size_bounds() {
+        let root = tmpdir("size");
+        std::fs::write(root.join("small.bin"), vec![0u8; 10]).unwrap();
+        std::fs::write(root.join("big.bin"), vec![0u8; 4096]).unwrap();
+
+        let filter = Filter {
+            size_min: Some(100),
+            size_max: Some(2048),
+            ..Default::default()
+        };
+        let kept = scan_with(&root, &filter).unwrap();
+        assert!(kept.is_empty(), "两个文件都应被大小规则排除");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn signature_is_order_insensitive() {
+        let a = Filter {
+            ignore_dotfiles: true,
+            ignore_extensions: vec!["LNK".into(), ".tmp".into()],
+            ..Default::default()
+        };
+        let b = Filter {
+            ignore_dotfiles: true,
+            ignore_extensions: vec!["tmp".into(), "lnk".into()],
+            ..Default::default()
+        };
+        assert_eq!(a.signature(), b.signature());
+        assert_ne!(a.signature(), Filter::default().signature());
     }
 }

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use sync_client::{run, Config};
-use sync_core::{root_hash, scan, Store};
+use sync_core::{root_hash, scan_with, Store};
 
 #[derive(Parser, Debug)]
 #[command(name = "sync", version, about = "两台 Windows 经 Linux 中继双向同步")]
@@ -32,6 +32,10 @@ struct Args {
     /// 更改同步目录时确认清空共识快照
     #[arg(long)]
     force: bool,
+
+    /// 等待对端上线的秒数（默认 300）
+    #[arg(long, default_value_t = 300)]
+    wait: u64,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -94,7 +98,7 @@ fn resolve(args: &Args) -> Result<Config> {
 
 fn cmd_scan(args: &Args) -> Result<()> {
     let cfg = resolve(args)?;
-    let entries = scan(Path::new(&cfg.root))?;
+    let entries = scan_with(Path::new(&cfg.root), &cfg.filter)?;
     let files = entries.iter().filter(|e| !e.is_dir()).count();
     let bytes: u64 = entries.iter().map(|e| e.size).sum();
 
@@ -116,7 +120,7 @@ async fn cmd_sync(args: &Args) -> Result<()> {
     let cfg = resolve(args)?;
     println!("同步 {} ⇄ {}", cfg.root, cfg.server);
 
-    let report = run(&cfg, None, false, args.force, 300).await?;
+    let report = run(&cfg, None, false, args.force, args.wait).await?;
 
     if report.up_to_date {
         println!("结果：两端已一致，无需传输");

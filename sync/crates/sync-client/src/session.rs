@@ -22,16 +22,15 @@ use std::sync::mpsc::Sender;
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use crate::config::{Config, SyncMode};
 use sync_core::{
-    chunk_count, conflict_path, diff, join_root, read_chunk, remove_path, root_hash, scan,
-    IncomingFile, Store,
+    chunk_count, conflict_path, diff, join_root, read_chunk, remove_path, root_hash, scan_with,
+    Activity, IncomingFile, Store,
 };
 use sync_proto::{ChunkHeader, Frame, IndexEntry, Msg, INDEX_PAGE, PROTO_VER};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-
-use crate::config::Config;
 
 pub type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -52,6 +51,8 @@ pub struct Report {
     pub bytes_recv: u64,
     /// 两端完全一致，本次没有传输任何内容
     pub up_to_date: bool,
+    /// 本次会话的文件级记录，结束后写入状态库供界面展示
+    pub activities: Vec<Activity>,
 }
 
 struct Session {
@@ -65,6 +66,10 @@ struct Session {
     quiet: bool,
     /// 等待对端上线的上限。GUI 自动同步会给很短的值，避免挂住。
     peer_timeout: std::time::Duration,
+    /// 本次确认推给对端成功的路径
+    pushed_ok: HashSet<String>,
+    /// 本次从对端成功落地的路径
+    pulled_ok: HashSet<String>,
 }
 
 impl Session {
@@ -82,6 +87,20 @@ impl Session {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Event::Progress { done, total, what });
         }
+    }
+
+    /// 记一条文件级记录。界面「记录」页就是这些行的汇总。
+    fn note(&mut self, path: &str, action: &str, ok: bool, message: &str) {
+        self.report.activities.push(Activity {
+            path: path.to_string(),
+            action: action.to_string(),
+            ok,
+            message: message.to_string(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+        });
     }
 
     async fn send(&mut self, m: Msg) -> Result<()> {
@@ -167,6 +186,10 @@ impl Session {
     }
 
     /// 等待对端上线。超时则报错——GUI 的自动同步不能在这里挂住几分钟。
+    ///
+    /// 等待期间每 20 秒发一次心跳：服务端把"长时间没有任何数据"判为僵尸连接并关闭，
+    /// 而合法等待对端时恰恰是一句话都不说的，不发心跳会被误杀
+    /// （客户端只会看到"连接被重置"，无从理解原因）。
     async fn wait_peer(&mut self) -> Result<()> {
         let deadline = tokio::time::Instant::now() + self.peer_timeout;
         loop {
@@ -177,15 +200,23 @@ impl Session {
                     self.peer_timeout.as_secs()
                 );
             }
-            let msg = match tokio::time::timeout(remain, self.recv()).await {
+            let slice = remain.min(std::time::Duration::from_secs(20));
+            let msg = match tokio::time::timeout(slice, self.recv()).await {
                 Ok(r) => match r? {
                     Frame::Control(m) => m,
                     Frame::Chunk(..) => continue,
                 },
-                Err(_) => bail!(
-                    "等待对端上线超时（{} 秒），对方可能没有运行或配置不一致",
-                    self.peer_timeout.as_secs()
-                ),
+                Err(_) => {
+                    // 还不到截止时间 → 这是心跳间隔，不是超时
+                    if tokio::time::Instant::now() < deadline {
+                        self.send(Msg::KeepAlive).await?;
+                        continue;
+                    }
+                    bail!(
+                        "等待对端上线超时（{} 秒），对方可能没有运行或配置不一致",
+                        self.peer_timeout.as_secs()
+                    );
+                }
             };
             match msg {
                 Msg::PeerStatus {
@@ -209,6 +240,8 @@ impl Session {
         &mut self,
         local: &[IndexEntry],
         local_hash: &str,
+        filter_sig: &str,
+        strict_filter: bool,
     ) -> Result<Option<Vec<IndexEntry>>> {
         self.emit(format!("对端已上线: {}", short_id(&self.peer_id)));
 
@@ -216,6 +249,7 @@ impl Session {
             file_count: local.len() as u64,
             total_bytes: local.iter().map(|e| e.size).sum(),
             root_hash: local_hash.to_string(),
+            filter_sig: filter_sig.to_string(),
         };
         self.send(digest).await?;
 
@@ -229,7 +263,32 @@ impl Session {
             };
 
             match msg {
-                Msg::IndexDigest { root_hash: rh, .. } => {
+                Msg::IndexDigest {
+                    root_hash: rh,
+                    filter_sig: peer_sig,
+                    ..
+                } => {
+                    // 过滤规则不一致必须中止，不能"先把不同的传一部分"：
+                    // 一方忽略的文件，在另一方眼里就是被删除了，会传播成删除操作。
+                    if peer_sig != filter_sig {
+                        if peer_sig.is_empty() {
+                            if strict_filter {
+                                bail!(
+                                    "对端版本较旧，不上报过滤规则，而本机已启用过滤。\n\
+                                     继续同步可能把被忽略的文件在对端删掉。\n\
+                                     请两端都升级到同一版本，或先关闭过滤规则。"
+                                );
+                            }
+                        } else {
+                            bail!(
+                                "两端的过滤规则不一致，已中止本次同步。\n\
+                                 本机：{filter_sig}\n对端：{peer_sig}\n\
+                                 过滤规则不一时，被忽略的文件会被对方误判为删除。\n\
+                                 请把两台设备的「忽略规则」配成完全一致。"
+                            );
+                        }
+                    }
+
                     if rh == local_hash {
                         return Ok(None);
                     }
@@ -268,6 +327,7 @@ impl Session {
                     path: e.path.clone(),
                 })
                 .await?;
+                self.note(&e.path, "建目录", true, "");
                 continue;
             }
 
@@ -292,6 +352,7 @@ impl Session {
                 }
             };
             if !want {
+                self.note(&e.path, "上传", true, "对端已存在，跳过");
                 continue;
             }
 
@@ -320,8 +381,11 @@ impl Session {
                     Msg::FileAck { path, ok, .. } if path == e.path => {
                         if ok {
                             self.report.pushed += 1;
+                            self.pushed_ok.insert(e.path.clone());
+                            self.note(&e.path, "上传", true, "");
                         } else {
                             self.emit(format!("对端未能落地: {}", e.path));
+                            self.note(&e.path, "上传", false, "对端未能落地");
                         }
                         break;
                     }
@@ -352,6 +416,7 @@ impl Session {
                     Msg::PushDone { .. } => {
                         for (p, f) in incoming.drain() {
                             self.emit(format!("未完成接收，已丢弃: {p}"));
+                            self.note(&p, "下载", false, "未完成接收，已丢弃");
                             f.abort();
                         }
                         break;
@@ -360,6 +425,7 @@ impl Session {
                     Msg::Mkdir { path } => {
                         if let Ok(full) = join_root(&self.root, &path) {
                             let _ = std::fs::create_dir_all(full);
+                            self.note(&path, "建目录", true, "");
                         }
                     }
 
@@ -385,6 +451,7 @@ impl Session {
                             }
                             Err(e) => {
                                 self.emit(format!("无法创建 {path}: {e}"));
+                                self.note(&path, "下载", false, &format!("无法创建: {e}"));
                                 self.send(Msg::FileAck {
                                     path,
                                     blake3,
@@ -399,6 +466,8 @@ impl Session {
                         Some(f) => match f.finish(&blake3) {
                             Ok(()) => {
                                 self.report.pulled += 1;
+                                self.pulled_ok.insert(path.clone());
+                                self.note(&path, "下载", true, "");
                                 self.send(Msg::FileAck {
                                     path,
                                     blake3,
@@ -408,6 +477,7 @@ impl Session {
                             }
                             Err(e) => {
                                 self.emit(format!("落地失败 {path}: {e}"));
+                                self.note(&path, "下载", false, &format!("落地失败: {e}"));
                                 self.send(Msg::FileAck {
                                     path,
                                     blake3,
@@ -429,6 +499,7 @@ impl Session {
                     Msg::Delete { path, .. } => {
                         remove_path(&self.root, &path)?;
                         self.report.deleted += 1;
+                        self.note(&path, "删除本地", true, "对端已删除");
                     }
 
                     Msg::Bye { reason } => bail!("连接中断: {reason}"),
@@ -451,6 +522,7 @@ impl Session {
             .with_context(|| format!("保留冲突副本 {new_rel}"))?;
         self.report.conflicts += 1;
         self.emit(format!("冲突，保留本地副本: {new_rel}"));
+        self.note(rel, "冲突副本", true, &new_rel);
         Ok(())
     }
 }
@@ -502,35 +574,51 @@ pub async fn run(
     wait_peer_secs: u64,
 ) -> Result<Report> {
     let db = Config::state_db();
-    let (device_id, base, stored_root) = {
-        let store = Store::open(&db)?;
-        (store.device_id()?, store.load_base()?, store.root_path()?)
-    };
-
-    // 同步目录变更检测：base 的键是相对路径，换根目录后旧快照会误判
     let root_str = cfg.root.replace('\\', "/");
-    if let Some(old) = stored_root {
-        if old.replace('\\', "/") != root_str {
-            if !allow_root_change {
-                bail!(
-                    "同步目录已变更：\n  原目录: {old}\n  新目录: {}\n\
-                     更改目录会清空共识快照，下次同步将全量重建基线。\n\
-                     确认请加 --force（GUI 会弹窗确认）。",
-                    cfg.root
-                );
+    let filter_sig = cfg.filter.signature();
+
+    // 打开状态库，先做两项"共识是否还有效"的检查，再读 base。
+    // 顺序很重要：先清空再加载，否则会拿着已失效的快照算差异。
+    let (device_id, base) = {
+        let store = Store::open(&db)?;
+
+        // 同步目录变更：base 的键是相对路径，换根目录后旧快照会误判
+        if let Some(old) = store.root_path()? {
+            if old.replace('\\', "/") != root_str {
+                if !allow_root_change {
+                    bail!(
+                        "同步目录已变更：\n  原目录: {old}\n  新目录: {}\n\
+                         更改目录会清空共识快照，下次同步将全量重建基线。\n\
+                         确认请加 --force（GUI 会弹窗确认）。",
+                        cfg.root
+                    );
+                }
+                store.clear_base()?;
+                store.clear_pending()?;
+                store.set_root_path(&root_str)?;
+                tracing::warn!("同步目录已变更，已清空共识快照");
             }
-            let store = Store::open(&db)?;
-            store.clear_base()?;
-            store.clear_pending()?;
+        } else {
             store.set_root_path(&root_str)?;
         }
-    } else {
-        let store = Store::open(&db)?;
-        store.set_root_path(&root_str)?;
-    }
+
+        // 过滤规则变更：被忽略的文件会从索引里消失，若继续沿用旧 base，
+        // 会被判定为"本地删除了它"并传播成对端的删除。必须重建共识。
+        let stored_sig = store.meta("filter_sig")?;
+        if stored_sig.as_deref() != Some(filter_sig.as_str()) {
+            if stored_sig.is_some() {
+                store.clear_base()?;
+                store.clear_pending()?;
+                tracing::warn!("过滤规则已变更，已清空共识快照，本次将全量重建");
+            }
+            store.set_meta("filter_sig", &filter_sig)?;
+        }
+
+        (store.device_id()?, store.load_base()?)
+    };
 
     let root = PathBuf::from(&cfg.root);
-    let local = scan(&root)?;
+    let local = scan_with(&root, &cfg.filter)?;
     let local_hash = root_hash(&local);
     let local_map: HashMap<String, IndexEntry> = local
         .iter()
@@ -552,6 +640,8 @@ pub async fn run(
         report: Report::default(),
         quiet,
         peer_timeout: std::time::Duration::from_secs(wait_peer_secs.max(1)),
+        pushed_ok: HashSet::new(),
+        pulled_ok: HashSet::new(),
     };
 
     sess.send(Msg::Hello {
@@ -561,12 +651,21 @@ pub async fn run(
     })
     .await?;
 
+    // 对端索引的 (路径 -> 内容哈希)，用于事后判定"哪些路径双方确实一致"
+    let mut peer_hash: HashMap<String, String> = HashMap::new();
+
     let report = match {
         sess.wait_peer().await?;
-        sess.exchange_index(&local, &local_hash).await?
+        sess.exchange_index(&local, &local_hash, &filter_sig, !cfg.filter.is_empty())
+            .await?
     } {
         None => {
             sess.emit("两端内容一致，无需同步");
+            // 摘要相同即两端完全一致，全部路径都可以确认
+            peer_hash = local_map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.blake3.clone()))
+                .collect();
             let mut r = std::mem::take(&mut sess.report);
             r.up_to_date = true;
             r
@@ -587,7 +686,41 @@ pub async fn run(
                 .into_iter()
                 .map(|e| (e.path.clone(), e))
                 .collect();
-            let plan = diff(&base, &local_map, &remote_map);
+            peer_hash = remote_map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.blake3.clone()))
+                .collect();
+            let mut plan = diff(&base, &local_map, &remote_map);
+
+            // 按同步模式裁剪计划：单向模式下主动放弃另一个方向的动作。
+            // 这里只是"不做"，不改 base——被放弃的差异下次还会被算出，
+            // 属于预期行为（单向模式本来就永远不收敛）。
+            match cfg.mode {
+                SyncMode::Bidirectional => {}
+                SyncMode::UploadOnly => {
+                    let dropped = plan.pull.len() + plan.delete_local.len() + plan.conflicts.len();
+                    plan.pull.clear();
+                    plan.delete_local.clear();
+                    plan.conflicts.clear();
+                    if dropped > 0 {
+                        sess.emit(format!(
+                            "仅上传模式：忽略 {dropped} 项对端变更（不拉取、不删除本地）"
+                        ));
+                    }
+                }
+                SyncMode::DownloadOnly => {
+                    let dropped = plan.push.len() + plan.delete_remote.len() + plan.conflicts.len();
+                    plan.push.clear();
+                    plan.delete_remote.clear();
+                    plan.conflicts.clear();
+                    if dropped > 0 {
+                        sess.emit(format!(
+                            "仅下载模式：忽略 {dropped} 项本机变更（不上传、不删除对端）"
+                        ));
+                    }
+                }
+            }
+
             sess.emit(format!(
                 "差异：推送 {}，拉取 {}，删除 {}，冲突 {}",
                 plan.push.len(),
@@ -657,23 +790,46 @@ pub async fn run(
                     is_dir: false,
                 })
                 .await?;
+                sess.note(p, "删除对端", true, "本机已删除");
             }
             for p in &plan.delete_local {
                 remove_path(&sess.root, p)?;
                 sess.report.deleted += 1;
+                sess.note(p, "删除本地", true, "对端已删除");
             }
 
             std::mem::take(&mut sess.report)
         }
     };
 
+    let pushed_ok = std::mem::take(&mut sess.pushed_ok);
+    let pulled_ok = std::mem::take(&mut sess.pulled_ok);
     drop(sess);
 
-    // 会话成功，重扫并写入新的共识基线
+    // 会话成功，写入新的共识基线；同时落盘本次的文件级记录。
+    //
+    // 基线必须是「双方确认一致的路径」，不能简单等于本地扫描结果：
+    // 单向模式下被刻意跳过的文件只存在于一方，若写进基线，等切回双向时
+    // 另一方会判定"对端把它删了"，于是删除本地文件。这个坑必须从语义上堵住。
     {
         let mut store = Store::open(&db)?;
-        let final_entries = scan(&root)?;
-        store.replace_base(&final_entries)?;
+        let final_entries = scan_with(&root, &cfg.filter)?;
+        let confirmed: Vec<IndexEntry> = final_entries
+            .into_iter()
+            .filter(|e| {
+                // 本次推给对方且对方确认落地
+                pushed_ok.contains(&e.path)
+                    // 本次从对方拉取并落地成功
+                    || pulled_ok.contains(&e.path)
+                    // 或者会话开始时两端内容本来就相同
+                    || peer_hash
+                        .get(&e.path)
+                        .is_some_and(|h| *h == e.blake3)
+            })
+            .collect();
+        store.replace_base(&confirmed)?;
+        store.push_activities(&report.activities)?;
+        store.prune_activities(2000)?;
     }
 
     Ok(report)

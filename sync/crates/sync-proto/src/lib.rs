@@ -77,10 +77,18 @@ pub enum Msg {
         reason: String,
     },
 
+    /// 等待对端期间的心跳。服务端靠"收到任何数据"判断连接活着，
+    /// 不发送它的话，单独等待的一方会在空闲 180 秒后被当成僵尸踢掉。
+    KeepAlive,
+
     IndexDigest {
         file_count: u64,
         total_bytes: u64,
         root_hash: String,
+        /// 过滤规则签名。两端必须一致——一方忽略的文件在另一方看来是"被删除"，
+        /// 会把删除传播回去。旧版本没有这个字段，缺省为空表示"未声明"。
+        #[serde(default)]
+        filter_sig: String,
     },
     IndexChunk {
         seq: u32,

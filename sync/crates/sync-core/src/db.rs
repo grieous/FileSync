@@ -39,7 +39,31 @@ CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL
 );
+
+-- 文件级操作记录：界面上"记录"页直接读这张表。
+-- 只留最近若干条（默认 2000），不当作审计日志长期保存。
+CREATE TABLE IF NOT EXISTS activity (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    path       TEXT NOT NULL,
+    action     TEXT NOT NULL,
+    ok         INTEGER NOT NULL,
+    message    TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_activity_time ON activity(created_at DESC);
 "#;
+
+/// 一条文件级记录，对应界面「记录」里的一行。
+#[derive(Debug, Clone)]
+pub struct Activity {
+    pub path: String,
+    /// 上传 / 下载 / 删除 / 冲突副本 / 建目录
+    pub action: String,
+    pub ok: bool,
+    pub message: String,
+    /// Unix 秒
+    pub created_at: i64,
+}
 
 pub struct Store {
     conn: Connection,
@@ -163,6 +187,68 @@ impl Store {
 
     pub fn set_root_path(&self, p: &str) -> Result<()> {
         self.set_meta("root", p)
+    }
+
+    /// 批量写入文件级记录。一次会话写一次，比逐条提交快得多。
+    pub fn push_activities(&self, items: &[Activity]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO activity(path, action, ok, message, created_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for a in items {
+                stmt.execute(params![
+                    a.path,
+                    a.action,
+                    a.ok as i64,
+                    a.message,
+                    a.created_at
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 最近的记录，按时间倒序。
+    pub fn recent_activities(&self, limit: usize) -> Result<Vec<Activity>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, action, ok, message, created_at
+             FROM activity ORDER BY created_at DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(Activity {
+                path: r.get(0)?,
+                action: r.get(1)?,
+                ok: r.get::<_, i64>(2)? != 0,
+                message: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn clear_activities(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM activity", [])?;
+        Ok(())
+    }
+
+    /// 只保留最近 `keep` 条，避免状态库无限增长。
+    pub fn prune_activities(&self, keep: usize) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM activity WHERE id NOT IN
+             (SELECT id FROM activity ORDER BY id DESC LIMIT ?1)",
+            [keep as i64],
+        )?;
+        Ok(())
     }
 
     /// 会话失败时清空 base 的重建路径：整表替换。

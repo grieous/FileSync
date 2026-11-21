@@ -30,7 +30,15 @@ use tokio::sync::{mpsc, Mutex};
 
 /// 连接空闲多久判定为僵尸。
 /// 客户端两次同步之间会有几十秒静默，所以不能设太短。
-const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// 可用 `SYNC_IDLE_SECS` 覆盖（测试僵尸回收逻辑时很有用）。
+fn idle_timeout() -> std::time::Duration {
+    let secs = std::env::var("SYNC_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(180);
+    std::time::Duration::from_secs(secs)
+}
 
 #[derive(Default)]
 struct Room {
@@ -114,7 +122,7 @@ async fn handle(socket: WebSocket, st: AppState, default_room: String) {
                 }
             }
 
-            incoming = tokio::time::timeout(IDLE_TIMEOUT, stream.next()) => {
+            incoming = tokio::time::timeout(idle_timeout(), stream.next()) => {
                 let msg = match incoming {
                     // 超时：客户端可能已经崩了/被强杀，TCP 没来得及 FIN。
                     // 不清理的话它会一直占着房间，让后续连接"配对成功"到一个死连接。

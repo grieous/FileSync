@@ -1,8 +1,11 @@
 //! WinSync 图形界面。
 //!
-//! 这是给人用的主程序：填好服务器、密钥、同步目录，点一次保存，之后开着就行。
-//! 同步在后台线程跑（独立的 tokio runtime），界面通过 channel 收事件，不会被阻塞。
+//! 布局参照同类成熟产品（飞牛同步）的组织方式：
+//!   同步 —— 连接设置、同步模式、过滤规则、状态与进度
+//!   记录 —— 文件级操作记录（谁、什么动作、成功还是失败）
+//!   日志 —— 原始运行日志，排查用
 //!
+//! 同步在后台线程跑（独立 tokio runtime），界面通过 channel 收事件，不会被阻塞。
 //! release 编译时用 `windows_subsystem = "windows"` 隐藏黑色控制台窗口。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -12,12 +15,21 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use notify::Watcher;
+use sync_client::config::SyncMode;
 use sync_client::session::{self, Event, Report};
 use sync_client::Config;
+use sync_core::{Activity, Filter, Store};
 
 enum WorkerMsg {
     Event(Event),
     Done(Result<Report, String>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Sync,
+    Records,
+    Logs,
 }
 
 fn main() -> eframe::Result<()> {
@@ -36,8 +48,8 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([580.0, 720.0])
-            .with_min_inner_size([520.0, 560.0])
+            .with_inner_size([640.0, 760.0])
+            .with_min_inner_size([560.0, 600.0])
             .with_title(format!("WinSync v{} — 文件夹同步", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
@@ -108,6 +120,17 @@ struct App {
     token: String,
     workspace: String,
     root: String,
+    mode: SyncMode,
+
+    // 过滤规则在界面上用更友好的单位编辑，保存时再折算成字节
+    filter_dotfiles: bool,
+    filter_ext: String,
+    filter_min_mb: f64,
+    filter_max_mb: f64,
+
+    tab: Tab,
+    records: Vec<Activity>,
+    records_loaded: bool,
 
     running: bool,
     auto: bool,
@@ -154,12 +177,26 @@ impl App {
 
         let (tx, rx) = channel();
         let (watch_tx, watch_rx) = channel();
+        let mode = cfg.mode;
+        let filter_dotfiles = cfg.filter.ignore_dotfiles;
+        let filter_ext = cfg.filter.ignore_extensions.join(",");
+        let filter_min_mb = cfg.filter.size_min.map(|b| b as f64 / MB).unwrap_or(0.0);
+        let filter_max_mb = cfg.filter.size_max.map(|b| b as f64 / MB).unwrap_or(0.0);
+
         let mut app = Self {
             server: cfg.server.clone(),
             token: cfg.token.clone(),
             workspace: cfg.workspace.clone(),
             root: cfg.root.clone(),
+            mode,
+            filter_dotfiles,
+            filter_ext,
+            filter_min_mb,
+            filter_max_mb,
             cfg,
+            tab: Tab::Sync,
+            records: Vec::new(),
+            records_loaded: false,
             running: false,
             auto: true,
             next_auto: Instant::now() + Duration::from_secs(5),
@@ -213,7 +250,36 @@ impl App {
             v.push(format!("同步目录不存在：{root}"));
         }
 
+        if self.filter_min_mb > 0.0
+            && self.filter_max_mb > 0.0
+            && self.filter_min_mb >= self.filter_max_mb
+        {
+            v.push("过滤规则里「最小大小」不应大于等于「最大大小」".into());
+        }
+
         v
+    }
+
+    fn filter(&self) -> Filter {
+        Filter {
+            ignore_dotfiles: self.filter_dotfiles,
+            ignore_extensions: self
+                .filter_ext
+                .split(',')
+                .map(|s| s.trim().trim_start_matches('.').to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            size_min: if self.filter_min_mb > 0.0 {
+                Some((self.filter_min_mb * MB) as u64)
+            } else {
+                None
+            },
+            size_max: if self.filter_max_mb > 0.0 {
+                Some((self.filter_max_mb * MB) as u64)
+            } else {
+                None
+            },
+        }
     }
 
     fn current(&self) -> Config {
@@ -222,6 +288,8 @@ impl App {
             token: self.token.trim().to_string(),
             workspace: self.workspace.trim().to_string(),
             root: self.root.trim().to_string(),
+            mode: self.mode,
+            filter: self.filter(),
         }
     }
 
@@ -242,6 +310,15 @@ impl App {
         if self.logs.len() > 200 {
             self.logs.remove(0);
         }
+    }
+
+    fn reload_records(&mut self) {
+        self.records.clear();
+        match Store::open(&Config::state_db()).and_then(|s| s.recent_activities(300)) {
+            Ok(list) => self.records = list,
+            Err(e) => self.log(format!("读取记录失败: {e}")),
+        }
+        self.records_loaded = true;
     }
 
     fn start_sync(&mut self, wait_peer_secs: u64) {
@@ -296,6 +373,8 @@ impl App {
     }
 }
 
+const MB: f64 = 1024.0 * 1024.0;
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 收后台消息
@@ -327,6 +406,9 @@ impl eframe::App for App {
                         Err(e) => self.log(format!("失败：{e}")),
                     }
                     self.last = Some(res);
+                    if self.records_loaded {
+                        self.reload_records();
+                    }
                 }
             }
         }
@@ -368,11 +450,10 @@ impl eframe::App for App {
         }
 
         // ---- 触发同步 ----
-        // 两个来源：目录有变更（去抖 3 秒），或 30 秒兜底轮询。
+        // 两个来源：目录有变更（去抖 3 秒），或兜底轮询。
         // 轮询不能去掉——notify 在休眠唤醒、缓冲区溢出、网络盘场景下会丢事件。
         let due_poll = Instant::now() >= self.next_auto;
-        let due_change =
-            self.dirty && self.last_change.elapsed() > Duration::from_secs(3);
+        let due_change = self.dirty && self.last_change.elapsed() > Duration::from_secs(3);
 
         if self.auto && !self.running && (due_poll || due_change) {
             let issues = self.issues();
@@ -398,193 +479,398 @@ impl eframe::App for App {
             self.dirty = false;
         }
 
+        // 记录页按需加载，切过去时刷新一次
+        if self.tab == Tab::Records && !self.records_loaded {
+            self.reload_records();
+        }
+
         egui::TopBottomPanel::top("head").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                let (color, text) = if self.running {
+                    (egui::Color32::from_rgb(230, 165, 60), "同步中")
+                } else {
+                    match &self.last {
+                        Some(Ok(_)) => (egui::Color32::from_rgb(76, 175, 125), "正常"),
+                        Some(Err(_)) => (egui::Color32::from_rgb(226, 75, 74), "有错误"),
+                        None => (egui::Color32::from_gray(140), "尚未同步"),
+                    }
+                };
+                ui.label(egui::RichText::new("●").color(color).size(13.0));
                 ui.heading("WinSync");
                 ui.label(
                     egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                         .weak()
                         .small(),
                 );
-                ui.label(egui::RichText::new("两台 Windows 经 Linux 中继同步").weak());
+                ui.label(egui::RichText::new(text).small().color(color));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(t) = &self.last_time {
+                        ui.label(egui::RichText::new(format!("上次 {t}")).weak().small());
+                    }
+                });
             });
+
             ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                for (tab, label) in [
+                    (Tab::Sync, "同步"),
+                    (Tab::Records, "记录"),
+                    (Tab::Logs, "日志"),
+                ] {
+                    if ui.selectable_label(self.tab == tab, label).clicked() {
+                        self.tab = tab;
+                    }
+                }
+            });
+            ui.add_space(4.0);
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new("连接设置").strong());
-            ui.add_space(4.0);
-
-            egui::Grid::new("cfg")
-                .num_columns(2)
-                .spacing([10.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("服务器");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.server)
-                            .hint_text("ws://1.2.3.4:8443/ws")
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.end_row();
-
-                    ui.label("密钥");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.token)
-                            .password(true)
-                            .hint_text("与服务端 SYNC_TOKEN 一致")
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.end_row();
-
-                    ui.label("房间");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.workspace)
-                            .hint_text("两台设备必须相同")
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.end_row();
-
-                    ui.label("同步目录");
-                    ui.horizontal(|ui| {
-                        let w = (ui.available_width() - 76.0).max(120.0);
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.root)
-                                .hint_text(r"D:\Sync")
-                                .desired_width(w),
-                        );
-                        if ui.button("浏览…").clicked() {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                self.root = dir.to_string_lossy().to_string();
-                            }
-                        }
-                    });
-                    ui.end_row();
-                });
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("保存配置").clicked() {
-                    // 配置不完整时拒绝保存。之前允许存下 root 为空的配置，
-                    // 用户下次启动就会静默不工作，极难排查。
-                    let issues = self.issues();
-                    if !issues.is_empty() {
-                        self.saved_hint = Some("未保存：配置不完整".to_string());
-                        self.log(format!("拒绝保存：{}", issues.join("；")));
-                    } else {
-                        match self.current().save() {
-                            Ok(()) => {
-                                self.cfg = self.current();
-                                self.saved_hint = Some("已保存".to_string());
-                                self.log("配置已保存");
-                            }
-                            Err(e) => self.log(format!("保存失败: {e}")),
-                        }
-                    }
-                }
-
-                let can_run = !self.running && self.current().is_ready();
-                if ui
-                    .add_enabled(can_run, egui::Button::new("立即同步"))
-                    .clicked()
-                {
-                    self.start_sync(120);
-                }
-
-                if self.running {
-                    ui.spinner();
-                    ui.label(egui::RichText::new("同步中…").weak());
-                }
-
-                ui.separator();
-                ui.checkbox(&mut self.auto, "自动同步（每 30 秒）");
-
-                if let Some(h) = &self.saved_hint {
-                    ui.label(egui::RichText::new(h).weak());
-                }
-            });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(6.0);
-
-            // 状态区
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("状态").strong());
-                if let Some(t) = &self.last_time {
-                    ui.label(egui::RichText::new(format!("上次 {t}")).weak());
-                }
-            });
-            ui.add_space(4.0);
-
-            if let Some((done, total, what)) = &self.progress {
-                let frac = if *total == 0 {
-                    0.0
-                } else {
-                    *done as f32 / *total as f32
-                };
-                ui.add(egui::ProgressBar::new(frac).show_percentage());
-                ui.label(egui::RichText::new(what).small().weak());
-            } else if !self.issues().is_empty() {
-                // 配置有问题时，直接把原因摆出来，而不是让用户对着"尚未同步"猜
-                ui.label(
-                    egui::RichText::new("配置不完整，无法同步：")
-                        .color(egui::Color32::from_rgb(226, 75, 74)),
-                );
-                for issue in self.issues() {
-                    ui.label(
-                        egui::RichText::new(format!("· {issue}"))
-                            .small()
-                            .color(egui::Color32::from_rgb(226, 75, 74)),
-                    );
-                }
-            } else if let Some(res) = &self.last {
-                match res {
-                    Ok(r) if r.up_to_date => {
-                        ui.label(egui::RichText::new("✓ 两端内容一致").color(egui::Color32::from_rgb(76, 175, 125)));
-                    }
-                    Ok(r) => {
-                        ui.label(format!(
-                            "推送 {}　拉取 {}　删除 {}　冲突 {}",
-                            r.pushed, r.pulled, r.deleted, r.conflicts
-                        ));
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "上行 {}　下行 {}",
-                                human_bytes(r.bytes_sent),
-                                human_bytes(r.bytes_recv)
-                            ))
-                            .weak(),
-                        );
-                    }
-                    Err(e) => {
-                        ui.label(egui::RichText::new(format!("✗ {e}")).color(egui::Color32::from_rgb(226, 75, 74)));
-                    }
-                }
-            } else {
-                ui.label(egui::RichText::new("尚未同步").weak());
-            }
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new("日志").strong());
-
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for line in &self.logs {
-                        ui.label(egui::RichText::new(line).small().monospace());
-                    }
-                });
+        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Sync => self.ui_sync(ui),
+            Tab::Records => self.ui_records(ui),
+            Tab::Logs => self.ui_logs(ui),
         });
 
         if self.running || self.auto {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+impl App {
+    fn ui_sync(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+
+        // 一句话说明当前同步对：本机目录 ⇄ 服务器/房间
+        let target = if self.server.trim().is_empty() {
+            "未配置服务器".to_string()
+        } else {
+            format!("{} · 房间 {}", short_server(&self.server), self.workspace)
+        };
+        ui.label(
+            egui::RichText::new(format!(
+                "{}  ⇄  {}",
+                if self.root.trim().is_empty() {
+                    "未选择目录"
+                } else {
+                    self.root.trim()
+                },
+                target
+            ))
+            .weak()
+            .small(),
+        );
+        ui.add_space(6.0);
+
+        egui::Grid::new("cfg")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("服务器");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.server)
+                        .hint_text("ws://1.2.3.4:8443/ws")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.end_row();
+
+                ui.label("密钥");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.token)
+                        .password(true)
+                        .hint_text("与服务端 SYNC_TOKEN 一致")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.end_row();
+
+                ui.label("房间");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.workspace)
+                        .hint_text("两台设备必须相同")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.end_row();
+
+                ui.label("同步目录");
+                ui.horizontal(|ui| {
+                    let w = (ui.available_width() - 76.0).max(120.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.root)
+                            .hint_text(r"D:\Sync")
+                            .desired_width(w),
+                    );
+                    if ui.button("浏览…").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.root = dir.to_string_lossy().to_string();
+                        }
+                    }
+                });
+                ui.end_row();
+            });
+
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("同步模式").strong());
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.mode, SyncMode::Bidirectional, "双向");
+            ui.radio_value(&mut self.mode, SyncMode::UploadOnly, "仅上传");
+            ui.radio_value(&mut self.mode, SyncMode::DownloadOnly, "仅下载");
+        });
+        ui.label(
+            egui::RichText::new(match self.mode {
+                SyncMode::Bidirectional => "两端都改，冲突时各留一份副本（常规用法）",
+                SyncMode::UploadOnly => "只把本机变更推给对端；对端的变更不会拉到本机。单向场景下对端应设为「仅下载」。",
+                SyncMode::DownloadOnly => "只接收对端变更；本机改动不会上传。单向场景下对端应设为「仅上传」。",
+            })
+            .small()
+            .weak(),
+        );
+
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new("过滤规则（两台设备必须完全一致）")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.checkbox(&mut self.filter_dotfiles, "忽略以 . 开头的文件和目录（如 .git）");
+                ui.horizontal(|ui| {
+                    ui.label("忽略扩展名");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.filter_ext)
+                            .hint_text("lnk, pst, tmp")
+                            .desired_width(180.0),
+                    );
+                    ui.label(egui::RichText::new("逗号分隔，不带点").weak().small());
+                });
+                ui.horizontal(|ui| {
+                    ui.label("大小范围");
+                    ui.add(
+                        egui::DragValue::new(&mut self.filter_min_mb)
+                            .speed(0.5)
+                            .range(0.0..=1_000_000.0)
+                            .suffix(" MB"),
+                    );
+                    ui.label("—");
+                    ui.add(
+                        egui::DragValue::new(&mut self.filter_max_mb)
+                            .speed(0.5)
+                            .range(0.0..=1_000_000.0)
+                            .suffix(" MB"),
+                    );
+                    ui.label(egui::RichText::new("0 表示不限").weak().small());
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "被过滤的文件在两端都不参与同步。改动规则会重建共识快照（不会删除文件）。",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("保存配置").clicked() {
+                // 配置不完整时拒绝保存。之前允许存下 root 为空的配置，
+                // 用户下次启动就会静默不工作，极难排查。
+                let issues = self.issues();
+                if !issues.is_empty() {
+                    self.saved_hint = Some("未保存：配置不完整".to_string());
+                    self.log(format!("拒绝保存：{}", issues.join("；")));
+                } else {
+                    match self.current().save() {
+                        Ok(()) => {
+                            self.cfg = self.current();
+                            self.saved_hint = Some("已保存".to_string());
+                            self.log("配置已保存");
+                        }
+                        Err(e) => self.log(format!("保存失败: {e}")),
+                    }
+                }
+            }
+
+            let can_run = !self.running && self.current().is_ready();
+            if ui
+                .add_enabled(can_run, egui::Button::new("立即同步"))
+                .clicked()
+            {
+                self.start_sync(120);
+            }
+
+            if self.running {
+                ui.spinner();
+                ui.label(egui::RichText::new("同步中…").weak());
+            }
+
+            ui.separator();
+            ui.checkbox(&mut self.auto, "自动同步");
+
+            if let Some(h) = &self.saved_hint {
+                ui.label(egui::RichText::new(h).weak());
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // 状态区
+        ui.label(egui::RichText::new("状态").strong());
+        ui.add_space(4.0);
+
+        if let Some((done, total, what)) = &self.progress {
+            let frac = if *total == 0 {
+                0.0
+            } else {
+                *done as f32 / *total as f32
+            };
+            ui.add(egui::ProgressBar::new(frac).show_percentage());
+            ui.label(egui::RichText::new(what).small().weak());
+        } else if !self.issues().is_empty() {
+            // 配置有问题时，直接把原因摆出来，而不是让用户对着"尚未同步"猜
+            ui.label(
+                egui::RichText::new("配置不完整，无法同步：")
+                    .color(egui::Color32::from_rgb(226, 75, 74)),
+            );
+            for issue in self.issues() {
+                ui.label(
+                    egui::RichText::new(format!("· {issue}"))
+                        .small()
+                        .color(egui::Color32::from_rgb(226, 75, 74)),
+                );
+            }
+        } else if let Some(res) = &self.last {
+            match res {
+                Ok(r) if r.up_to_date => {
+                    ui.label(
+                        egui::RichText::new("✓ 两端内容一致")
+                            .color(egui::Color32::from_rgb(76, 175, 125)),
+                    );
+                }
+                Ok(r) => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("推送 {}", r.pushed));
+                        ui.separator();
+                        ui.label(format!("拉取 {}", r.pulled));
+                        ui.separator();
+                        ui.label(format!("删除 {}", r.deleted));
+                        ui.separator();
+                        ui.label(format!("冲突 {}", r.conflicts));
+                    });
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "上行 {}　下行 {}",
+                            human_bytes(r.bytes_sent),
+                            human_bytes(r.bytes_recv)
+                        ))
+                        .weak(),
+                    );
+                }
+                Err(e) => {
+                    ui.label(
+                        egui::RichText::new(format!("✗ {e}"))
+                            .color(egui::Color32::from_rgb(226, 75, 74)),
+                    );
+                }
+            }
+        } else {
+            ui.label(egui::RichText::new("尚未同步").weak());
+        }
+    }
+
+    fn ui_records(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("文件记录").strong());
+            ui.label(
+                egui::RichText::new(format!("最近 {} 条", self.records.len()))
+                    .weak()
+                    .small(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("打开数据目录").clicked() {
+                    let dir = Config::dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                }
+                if ui.button("清空").clicked() {
+                    match Store::open(&Config::state_db()).and_then(|s| s.clear_activities()) {
+                        Ok(()) => {
+                            self.records.clear();
+                            self.log("已清空文件记录");
+                        }
+                        Err(e) => self.log(format!("清空记录失败: {e}")),
+                    }
+                }
+                if ui.button("刷新").clicked() {
+                    self.reload_records();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
+
+        if self.records.is_empty() {
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("还没有记录。同步一次之后，每个被传输或删除的文件都会出现在这里。").weak());
+            return;
+        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("records")
+                    .num_columns(4)
+                    .striped(true)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        for a in &self.records {
+                            ui.label(egui::RichText::new(fmt_ts(a.created_at)).small().weak());
+                            let color = if a.ok {
+                                egui::Color32::from_rgb(76, 175, 125)
+                            } else {
+                                egui::Color32::from_rgb(226, 75, 74)
+                            };
+                            ui.label(egui::RichText::new(&a.action).small().color(color));
+                            ui.label(egui::RichText::new(&a.path).small().monospace());
+                            ui.label(egui::RichText::new(&a.message).small().weak());
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+
+    fn ui_logs(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("运行日志").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("打开数据目录").clicked() {
+                    let dir = Config::dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for line in &self.logs {
+                    ui.label(egui::RichText::new(line).small().monospace());
+                }
+            });
+    }
+}
+
+fn short_server(s: &str) -> String {
+    s.trim()
+        .trim_start_matches("ws://")
+        .trim_start_matches("wss://")
+        .trim_end_matches("/ws")
+        .to_string()
 }
 
 fn human_bytes(n: u64) -> String {
@@ -609,6 +895,19 @@ fn now_stamp() -> String {
         .unwrap_or(0)
         .rem_euclid(86400);
     format!("{:02}:{:02}", rem / 3600, (rem % 3600) / 60)
+}
+
+/// 记录里的时间戳：月-日 时:分（本地时区按 UTC+8 估算，仅用于界面）
+fn fmt_ts(secs: i64) -> String {
+    let local = secs + 8 * 3600;
+    let days = local.div_euclid(86400);
+    let rem = local.rem_euclid(86400);
+    let (_, m, d) = civil(days);
+    format!(
+        "{m:02}-{d:02} {:02}:{:02}",
+        rem / 3600,
+        (rem % 3600) / 60
+    )
 }
 
 /// 写日志用的完整时间戳（UTC，精确到秒）。

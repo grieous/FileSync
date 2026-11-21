@@ -51,21 +51,38 @@ cargo test  --workspace          # 单元测试
 1. 启动 `winsync-gui.exe`
 2. 填服务器地址（`ws://IP:8443/ws`）、密钥、房间名
 3. 点"浏览…"选择要同步的文件夹
-4. 保存配置 → 立即同步
+4. 选同步模式（双向 / 仅上传 / 仅下载），按需展开「过滤规则」
+5. 保存配置 → 立即同步
 
-两台都开着时，30 秒内自动完成。界面下方有实时日志。
+界面分三页：同步 / 记录（文件级操作）/ 日志。两台都开着时一次会话通常不到一秒。
 
 ### 命令行（排查用）
 
 ```bash
-# 看本地状态，不联网
+# 看本地状态，不联网（会打印生效的模式与过滤规则签名）
 winsync.exe --server ws://IP:8443/ws --token 密钥 --root "D:\Sync" scan
 
 # 执行一次同步
 winsync.exe --server ws://IP:8443/ws --token 密钥 --root "D:\Sync" sync
 
+# 等待对端的时间（默认 300 秒）
+winsync.exe ... sync --wait 30
+
 # 打印配置与状态库位置
 winsync.exe where
+```
+
+模式与过滤规则属于持久配置，命令行不覆盖；改 `config.json` 或界面即可，例如：
+
+```json
+{
+  "server": "ws://192.168.3.222:18443/ws",
+  "token": "…",
+  "workspace": "default",
+  "root": "D:\\Sync",
+  "mode": "upload_only",
+  "filter": { "ignore_dotfiles": true, "ignore_extensions": ["lnk", "pst"] }
+}
 ```
 
 配置与 GUI 共用 `%APPDATA%\WinSync\config.json`，命令行参数可临时覆盖。
@@ -83,13 +100,16 @@ WINSYNC_CONFIG=.tmp/b.json WINSYNC_DB=.tmp/b.db winsync.exe --root .tmp/b sync
 ## 实测结果
 
 ```
-双向首次同步   A 推送 3 / 拉取 1      B 推送 1 / 拉取 3
-第二次同步     两端一致，零传输
-修改 + 删除    正确传播，内容一致
+双向 + 过滤     A 索引 3 条（.env/.git/.lnk 被过滤）→ B 收到 2 个文件，0 删除
+仅上传/仅下载   A 只推不入，B 只入不推；切回双向后 0 删除、0 误判
+过滤不一致      两端各自中止并打印双方签名，无任何文件变动
+心跳            服务端空闲阈值 25 秒，单端等待 70 秒不中断
 ```
 
 ## 尚未实现
 
+- **按需下载（Windows Cloud Files 占位符 / 水合）** —— 与成熟网盘客户端差距最大的一项
+- 选择性同步（只选子目录）
 - 托盘常驻 / 开机自启 / Windows 服务
 - 断点续传（大文件断开会重来）
 - 重命名优化（改名会重传整个文件）
