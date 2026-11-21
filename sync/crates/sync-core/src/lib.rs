@@ -4,6 +4,8 @@ pub mod db;
 pub mod fileio;
 pub mod index;
 
-pub use db::{Activity, Store};
+pub use db::{Activity, CachedHash, Store};
 pub use fileio::{chunk_count, conflict_path, join_root, read_chunk, remove_path, IncomingFile};
-pub use index::{diff, hash_file, root_hash, scan, scan_with, to_rel, Filter, Plan};
+pub use index::{
+    diff, hash_file, root_hash, scan, scan_cached, scan_with, to_rel, Filter, Plan, ScanStats,
+};

@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use sync_proto::{IndexEntry, Kind};
 use walkdir::WalkDir;
 
+use crate::db::CachedHash;
+
 /// 把绝对路径转成协议用的相对路径（`/` 分隔）。
 pub fn to_rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root)
@@ -117,6 +119,18 @@ impl Filter {
     }
 }
 
+/// 一次扫描的统计，用于日志与基准测试。
+#[derive(Debug, Default, Clone)]
+pub struct ScanStats {
+    pub files: usize,
+    /// 真正读盘算了哈希的文件数
+    pub hashed: usize,
+    /// 命中缓存、直接复用哈希的文件数
+    pub reused: usize,
+    pub skipped: usize,
+    pub duration_ms: u128,
+}
+
 /// 递归扫描目录，产出索引。无法读取的条目跳过并告警，不中断整体扫描。
 pub fn scan(root: &Path) -> Result<Vec<IndexEntry>> {
     scan_with(root, &Filter::default())
@@ -124,9 +138,26 @@ pub fn scan(root: &Path) -> Result<Vec<IndexEntry>> {
 
 /// 带过滤规则的扫描。
 pub fn scan_with(root: &Path, filter: &Filter) -> Result<Vec<IndexEntry>> {
+    Ok(scan_cached(root, filter, &HashMap::new())?.0)
+}
+
+/// 带过滤规则 + 哈希缓存的扫描。
+///
+/// 缓存键是相对路径，命中条件是「大小 + 纳秒级 mtime 都相同」。
+/// 命中就不读文件，直接把上次的 BLAKE3 拿来用——这是把每 30 秒一次的全量读盘
+/// 降成"只读改动过的文件"的关键。
+///
+/// 返回 (索引, 统计, 新的缓存表)。新缓存表应写回状态库，供下次复用。
+pub fn scan_cached(
+    root: &Path,
+    filter: &Filter,
+    cache: &HashMap<String, CachedHash>,
+) -> Result<(Vec<IndexEntry>, ScanStats, HashMap<String, CachedHash>)> {
+    let started = std::time::Instant::now();
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut out = Vec::new();
-    let mut skipped = 0usize;
+    let mut stats = ScanStats::default();
+    let mut fresh: HashMap<String, CachedHash> = HashMap::new();
 
     for item in WalkDir::new(&root)
         .follow_links(false)
@@ -175,54 +206,77 @@ pub fn scan_with(root: &Path, filter: &Filter) -> Result<Vec<IndexEntry>> {
 
             // 传输中途的临时文件永远不该进索引
             if name.ends_with(".synctmp") {
-                skipped += 1;
+                stats.skipped += 1;
                 continue;
             }
             if filter.ext_matches(&name) {
-                skipped += 1;
+                stats.skipped += 1;
                 continue;
             }
             let size = md.len();
             if filter.size_min.is_some_and(|v| size < v) || filter.size_max.is_some_and(|v| size > v)
             {
-                skipped += 1;
+                stats.skipped += 1;
                 continue;
             }
         }
 
-        let digest = if is_dir {
-            String::new()
-        } else {
-            match hash_file(path) {
-                Ok(d) => d,
-                Err(e) => {
-                    // 文件被独占打开（Office / 数据库）时走到这里，交给上层重试队列。
-                    tracing::warn!("跳过 {rel}: {e}");
-                    continue;
-                }
-            }
-        };
-
-        let mtime = md
+        let mtime_ns = md
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
+        let size = if is_dir { 0 } else { md.len() };
+
+        let digest = if is_dir {
+            String::new()
+        } else {
+            match cache.get(&rel) {
+                Some(c) if c.size == size && c.mtime_ns == mtime_ns => {
+                    stats.reused += 1;
+                    c.blake3.clone()
+                }
+                _ => match hash_file(path) {
+                    Ok(d) => {
+                        stats.hashed += 1;
+                        d
+                    }
+                    Err(e) => {
+                        // 文件被独占打开（Office / 数据库）时走到这里，交给上层重试队列。
+                        tracing::warn!("跳过 {rel}: {e}");
+                        continue;
+                    }
+                },
+            }
+        };
+
+        if !is_dir {
+            stats.files += 1;
+            fresh.insert(
+                rel.clone(),
+                CachedHash {
+                    size,
+                    mtime_ns,
+                    blake3: digest.clone(),
+                },
+            );
+        }
 
         out.push(IndexEntry {
             path: rel,
             kind: if is_dir { Kind::Dir } else { Kind::File },
-            size: if is_dir { 0 } else { md.len() },
+            size,
             blake3: digest,
-            mtime,
+            mtime: mtime_ns / 1_000_000_000,
         });
     }
 
-    if skipped > 0 {
-        tracing::info!("按过滤规则跳过 {skipped} 个文件");
+    stats.duration_ms = started.elapsed().as_millis();
+    if stats.skipped > 0 {
+        tracing::info!("按过滤规则跳过 {} 个文件", stats.skipped);
     }
-    Ok(out)
+    Ok((out, stats, fresh))
 }
 
 /// 把所有条目的 (path, blake3, size) 排序后做一次 BLAKE3。
@@ -480,8 +534,47 @@ mod tests {
     }
 
     #[test]
-    fn signature_is_order_insensitive() {
-        let a = Filter {
+    fn hash_cache_reuses_and_invalidates() {
+        let root = tmpdir("cache");
+        std::fs::write(root.join("a.txt"), b"aaa").unwrap();
+        std::fs::write(root.join("b.txt"), b"bbb").unwrap();
+
+        // 冷启动：两个文件都要读盘算哈希
+        let (first, s1, cache1) = scan_cached(&root, &Filter::default(), &HashMap::new()).unwrap();
+        assert_eq!(s1.hashed, 2);
+        assert_eq!(s1.reused, 0);
+        assert_eq!(first.len(), 2);
+
+        // 热启动：什么都没改，一个字节都不该读
+        let (second, s2, cache2) = scan_cached(&root, &Filter::default(), &cache1).unwrap();
+        assert_eq!(s2.hashed, 0, "内容未变不应重算哈希");
+        assert_eq!(s2.reused, 2);
+        assert_eq!(s1.files, s2.files);
+        // 索引内容必须完全一致，否则缓存会引入幽灵差异
+        let mut a: Vec<_> = first.iter().map(|e| (&e.path, &e.blake3)).collect();
+        let mut b: Vec<_> = second.iter().map(|e| (&e.path, &e.blake3)).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+
+        // 改内容：必须失效重算
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(root.join("a.txt"), b"aaa-changed").unwrap();
+        let (third, s3, _) = scan_cached(&root, &Filter::default(), &cache2).unwrap();
+        assert_eq!(s3.hashed, 1, "内容变化必须重新计算");
+        assert_eq!(s3.reused, 1);
+        let changed = third.iter().find(|e| e.path == "a.txt").unwrap();
+        assert_ne!(
+            changed.blake3,
+            cache2.get("a.txt").unwrap().blake3,
+            "改动后的哈希必须与缓存不同"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn signature_is_order_insensitive() {        let a = Filter {
             ignore_dotfiles: true,
             ignore_extensions: vec!["LNK".into(), ".tmp".into()],
             ..Default::default()

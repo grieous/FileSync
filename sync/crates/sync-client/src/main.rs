@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use sync_client::{run, Config};
-use sync_core::{root_hash, scan_with, Store};
+use sync_core::{root_hash, scan_cached, Store};
 
 #[derive(Parser, Debug)]
 #[command(name = "sync", version, about = "两台 Windows 经 Linux 中继双向同步")]
@@ -98,20 +98,28 @@ fn resolve(args: &Args) -> Result<Config> {
 
 fn cmd_scan(args: &Args) -> Result<()> {
     let cfg = resolve(args)?;
-    let entries = scan_with(Path::new(&cfg.root), &cfg.filter)?;
+    let store = Store::open(&Config::state_db())?;
+    let cache = store.load_hash_cache()?;
+    let (entries, stats, fresh) = scan_cached(Path::new(&cfg.root), &cfg.filter, &cache)?;
+    store.replace_hash_cache(&fresh)?;
+
     let files = entries.iter().filter(|e| !e.is_dir()).count();
     let bytes: u64 = entries.iter().map(|e| e.size).sum();
-
-    let store = Store::open(&Config::state_db())?;
 
     println!("同步目录 : {}", cfg.root);
     println!("服务器   : {}", cfg.server);
     println!("房间     : {}", cfg.workspace);
+    println!("模式     : {:?}", cfg.mode);
+    println!("过滤规则 : {}", cfg.filter.signature());
     println!("device_id: {}", store.device_id()?);
     println!("base 条目: {}", store.base_count()?);
     println!("目录     : {}", entries.len() - files);
     println!("文件     : {files}");
     println!("总字节   : {bytes}");
+    println!(
+        "扫描耗时 : {} ms（复用 {} 个哈希，重算 {} 个）",
+        stats.duration_ms, stats.reused, stats.hashed
+    );
     println!("root_hash: {}", root_hash(&entries));
     Ok(())
 }

@@ -24,7 +24,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use crate::config::{Config, SyncMode};
 use sync_core::{
-    chunk_count, conflict_path, diff, join_root, read_chunk, remove_path, root_hash, scan_with,
+    chunk_count, conflict_path, diff, join_root, read_chunk, remove_path, root_hash, scan_cached,
     Activity, IncomingFile, Store,
 };
 use sync_proto::{ChunkHeader, Frame, IndexEntry, Msg, INDEX_PAGE, PROTO_VER};
@@ -618,7 +618,18 @@ pub async fn run(
     };
 
     let root = PathBuf::from(&cfg.root);
-    let local = scan_with(&root, &cfg.filter)?;
+    // 用哈希缓存扫描：大小与 mtime 未变的文件不重复读盘。
+    // 之前每 30 秒的轮询会把整个目录读一遍，10 GB 目录就是每 30 秒 10 GB 读。
+    let cache = Store::open(&db)?.load_hash_cache().unwrap_or_default();
+    let (local, stats, cache) = scan_cached(&root, &cfg.filter, &cache)?;
+    if stats.files > 0 {
+        // 扫描完立刻回写，哪怕本次会话因为对端不在线而失败，下次也能复用。
+        Store::open(&db)?.replace_hash_cache(&cache)?;
+    }
+    let scan_msg = format!(
+        "扫描 {} 个文件：复用 {} 个哈希，重算 {} 个，{} ms",
+        stats.files, stats.reused, stats.hashed, stats.duration_ms
+    );
     let local_hash = root_hash(&local);
     let local_map: HashMap<String, IndexEntry> = local
         .iter()
@@ -650,6 +661,7 @@ pub async fn run(
         proto_ver: PROTO_VER,
     })
     .await?;
+    sess.emit(scan_msg);
 
     // 对端索引的 (路径 -> 内容哈希)，用于事后判定"哪些路径双方确实一致"
     let mut peer_hash: HashMap<String, String> = HashMap::new();
@@ -813,7 +825,8 @@ pub async fn run(
     // 另一方会判定"对端把它删了"，于是删除本地文件。这个坑必须从语义上堵住。
     {
         let mut store = Store::open(&db)?;
-        let final_entries = scan_with(&root, &cfg.filter)?;
+        let (final_entries, _, fresh_cache) = scan_cached(&root, &cfg.filter, &cache)?;
+        store.replace_hash_cache(&fresh_cache)?;
         let confirmed: Vec<IndexEntry> = final_entries
             .into_iter()
             .filter(|e| {

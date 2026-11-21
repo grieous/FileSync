@@ -40,6 +40,15 @@ CREATE TABLE IF NOT EXISTS meta (
     v TEXT NOT NULL
 );
 
+-- 哈希缓存：(路径, 大小, 纳秒级 mtime) 未变则复用上次的 BLAKE3，不必重读文件。
+-- 没有这张表时，每 30 秒的轮询都要把整个同步目录读一遍。
+CREATE TABLE IF NOT EXISTS hash_cache (
+    path     TEXT PRIMARY KEY,
+    size     INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    blake3   TEXT NOT NULL
+);
+
 -- 文件级操作记录：界面上"记录"页直接读这张表。
 -- 只留最近若干条（默认 2000），不当作审计日志长期保存。
 CREATE TABLE IF NOT EXISTS activity (
@@ -52,6 +61,14 @@ CREATE TABLE IF NOT EXISTS activity (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_time ON activity(created_at DESC);
 "#;
+
+/// 哈希缓存条目。大小与纳秒级 mtime 都没变，就认为内容没变，复用上次的哈希。
+#[derive(Debug, Clone)]
+pub struct CachedHash {
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub blake3: String,
+}
 
 /// 一条文件级记录，对应界面「记录」里的一行。
 #[derive(Debug, Clone)]
@@ -187,6 +204,44 @@ impl Store {
 
     pub fn set_root_path(&self, p: &str) -> Result<()> {
         self.set_meta("root", p)
+    }
+
+    /// 读出哈希缓存。键是相对路径。
+    pub fn load_hash_cache(&self) -> Result<HashMap<String, CachedHash>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, size, mtime_ns, blake3 FROM hash_cache")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                CachedHash {
+                    size: r.get::<_, i64>(1)? as u64,
+                    mtime_ns: r.get(2)?,
+                    blake3: r.get(3)?,
+                },
+            ))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            out.insert(k, v);
+        }
+        Ok(out)
+    }
+
+    /// 整表替换。扫描结果就是当前真实状态，多余条目应丢弃。
+    pub fn replace_hash_cache(&self, items: &HashMap<String, CachedHash>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM hash_cache", [])?;
+        {
+            let mut stmt =
+                tx.prepare("INSERT INTO hash_cache(path, size, mtime_ns, blake3) VALUES(?1,?2,?3,?4)")?;
+            for (path, c) in items {
+                stmt.execute(params![path, c.size as i64, c.mtime_ns, c.blake3])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// 批量写入文件级记录。一次会话写一次，比逐条提交快得多。

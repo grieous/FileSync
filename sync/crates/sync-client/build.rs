@@ -52,10 +52,25 @@ fn find_cvtres() -> Option<PathBuf> {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=winres/app.ico");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+
+    // 图标：资源管理器 / 任务栏读的是 exe 资源段里的这个 ICON，
+    // 窗口图标与托盘图标在运行时用同一份 .ico 解析，保证三处观感一致。
+    let ico = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("winres")
+        .join("app.ico");
+    let ico_line = if ico.exists() {
+        // RC 字符串里反斜杠是转义符（`\U` 之类会被吃掉），统一用正斜杠。
+        let p = ico.display().to_string().replace('\\', "/");
+        format!("1 ICON \"{p}\"\n")
+    } else {
+        println!("cargo:warning=缺少 winres/app.ico，跳过图标资源");
+        String::new()
+    };
 
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
     let mut nums = version
@@ -69,7 +84,7 @@ fn main() {
 
     let rc_text = format!(
         r#"#pragma code_page(65001)
-
+{ico_line}
 #define VS_VERSION_INFO   1
 #define VOS_NT_WINDOWS32  0x00040004L
 #define VFT_APP           0x00000001L
