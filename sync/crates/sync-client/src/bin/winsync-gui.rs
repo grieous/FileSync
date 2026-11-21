@@ -155,6 +155,7 @@ struct Wizard {
     ext: String,
     root: String,
     name: String,
+    note: String,
 }
 
 impl Wizard {
@@ -171,6 +172,7 @@ impl Wizard {
             ext: String::new(),
             root: String::new(),
             name: String::new(),
+            note: String::new(),
         }
     }
 
@@ -2329,7 +2331,14 @@ impl App {
             ui.horizontal(|ui| {
                 if w.step == 0 {
                     if ui.button("连接 NAS 设备").clicked() {
-                        // 目前同步走自建中继，没有"发现设备"概念，保留占位说明
+                        w.note = "通过自建中继连接，请直接填写上面三项".into();
+                    }
+                    if !w.note.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&w.note)
+                                .size(11.0)
+                                .color(ui_colors::WARN),
+                        );
                     }
                 } else if ui.button("上一步").clicked() {
                     w.step -= 1;
