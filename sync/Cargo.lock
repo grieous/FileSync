@@ -3613,6 +3613,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "sync-daemon"
+version = "0.6.2"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "notify",
+ "serde",
+ "serde_json",
+ "sync-client",
+ "sync-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "sync-proto"
 version = "0.6.2"
 dependencies = [

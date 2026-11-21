@@ -455,13 +455,36 @@ CSS 作为字符串内联（`loader: { '.css': 'text' }`），避免额外资源
 ### P1 daemon 引擎
 | # | 任务 | 完成标志 |
 |---|---|---|
-| 1.1 | crate 骨架、自有互斥体、`daemon.json`、`/health` | 双击运行后文件生成，重复启动被拒；exe 同时在跑也不受影响 |
-| 1.2 | `/api/state` 只读快照 | curl 能读到现有任务与设置 |
-| 1.3 | 任务 CRUD（含换目录 force、校验） | 与 exe 生成的 `config.json` 结构一致 |
-| 1.4 | 调度 + watcher + `session::run` 接入 | 触发同步后 events 流有 log/progress/done |
-| 1.5 | 活动查询、CSV 导出、日志环形/落盘、日志清理 | 导出文件与 exe 导出逐行一致 |
-| 1.6 | 限速、自启、打开目录、`/fs/list` | 限速生效可用 `--wait` 场景验证；路径穿越被拒 |
-| 1.7 | 单测 | 调度抖动、`issues` 拦截、root-changed、鉴权失败 4 组用例 |
+| 1.1 ✅ | crate 骨架、自有互斥体、`daemon.json`、`/health` | 双击运行后文件生成，重复启动被拒；exe 同时在跑也不受影响 |
+| 1.2 ✅ | `/api/state` 只读快照 | curl 能读到现有任务与设置 |
+| 1.3 ✅ | 任务 CRUD（含换目录 force、校验） | 与 exe 生成的 `config.json` 结构一致 |
+| 1.4 ✅ | 调度 + watcher + `session::run` 接入 | 触发同步后 events 流有 log/progress/done |
+| 1.5 ✅ | 活动查询、CSV 导出、日志环形/落盘、日志清理 | 导出文件与 exe 导出逐行一致 |
+| 1.6 ✅ | 限速、自启、打开目录、`/fs/list` | 限速生效可用 `--wait` 场景验证；路径穿越被拒 |
+| 1.7 ✅ | 单测 | 调度抖动、`issues` 拦截、root-changed、鉴权失败 4 组用例 |
+
+### P1 完成记录（2026-11-21）
+
+代码：`sync/crates/sync-daemon/`（约 1,900 行含测试与脚本），文档见该目录 `README.md`。
+
+| 验收项 | 证据 |
+|---|---|
+| 启动与握手 | 启动后 `daemon.json` 含 `pid/port/token/version/started_at`；`/health` 免鉴权、无 token 泄露；重复启动同目录会打印 already-running 并 exit 0 |
+| 状态目录隔离 | `WINSYNC_STATE_DIR` 生效，`/api/state.data_dir` 指向插件自己的树；`Config::dir()` 仅加一个分支，exe 不设该变量行为不变 |
+| 鉴权 | 无 Bearer → 401；token 定长比较（单测覆盖） |
+| 任务 CRUD | 建/改/删全通；换目录不带 `force` → `409 root-changed`；坏配置（`http://`、空密钥）→ `400 bad-request` |
+| 调度 + 真同步 | `e2e-sync.mjs`：真 relay + 真 daemon + 真 CLI，双向各落地 3 个文件，SSE 收到 7 条 log 与 `done{report}`，`runtime.last` 正确收尾 |
+| 记录与导出 | 同步后 `/api/activities` 有 4 条；`/api/export.csv` 表头与 exe 一致 |
+| 日志 | 内存环形 400 行 + `sync.log` 落盘；`/api/logs`、`/api/logfile` 可读 |
+| 目录重叠 | 5 组单测（同目录大小写/斜杠、父子互含、兄弟不重叠、盘根覆盖、空路径）；命中返回 `root-conflict` 并点名 exe 任务 |
+| 路径安全 | `/api/fs/list` 拒绝 `..`、绝对路径、盘符；`/api/open-dir` 只允许任务根目录 |
+| 单测 | 15 项全绿；`scripts/smoke.mjs` 11 项 HTTP 契约全绿 |
+
+已知取舍（写在这里避免以后翻旧账）：
+
+- `auto`（自动同步开关）不落盘，重启回到开——与 exe 行为一致。
+- 硬杀进程不会执行 Drop，`daemon.json` 会残留；插件侧按 pid 判活回收，daemon 启动时也会覆盖写。
+- 互斥体名带状态目录哈希：同一棵树仍单实例，不同树（测试/多实例）互不阻塞。
 
 ### P2 宿主与工具
 | # | 任务 | 完成标志 |

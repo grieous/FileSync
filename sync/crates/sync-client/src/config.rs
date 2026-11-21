@@ -98,7 +98,15 @@ pub fn new_id() -> String {
 }
 
 impl Config {
+    /// 配置、状态库、日志的根目录。
+    ///
+    /// 默认是 exe 用的 `%APPDATA%\WinSync`；设了 `WINSYNC_STATE_DIR` 就整个换掉。
+    /// dsh 插件的 daemon 靠这个变量把自己那棵树指到 `%LOCALAPPDATA%\dsh-winsync`，
+    /// 与 exe 完全隔离。exe 不设该变量，行为一字不变。
     pub fn dir() -> PathBuf {
+        if let Some(p) = std::env::var_os("WINSYNC_STATE_DIR") {
+            return PathBuf::from(p);
+        }
         std::env::var_os("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
