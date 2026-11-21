@@ -1,0 +1,32 @@
+# 构建产物（target 目录有 2 GB 以上）
+sync/target/
+
+# 分发的二进制，不进版本库
+sync/dist/*.exe
+sync/dist.zip
+
+# 某个工具自动生成的空嵌套仓库，保留但不纳入版本控制
+sync/.git.empty-backup/
+
+# 测试与临时产物：含下载的安装器、抓包工具的 exe、测试目录
+.tmp/
+
+# 本地运行时数据
+*.db
+*.db-wal
+*.db-shm
+*.db.bak-*
+sync.log
+
+# 旧版本备份（部署时用改名方式产生的）
+*.old.exe
+*.old-*.exe
+
+# 工作区内部数据
+.workbuddy/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

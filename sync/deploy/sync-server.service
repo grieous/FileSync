@@ -1,0 +1,33 @@
+[Unit]
+Description=WinSync relay (stateless frame forwarder)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=winsync
+Group=winsync
+EnvironmentFile=/etc/winsync/env
+ExecStart=/opt/winsync/sync-server
+Restart=always
+RestartSec=3
+
+# 服务器不存任何数据，沙箱可以收到最紧
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+
+# 只是个转发器，内存有上限
+MemoryMax=256M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
