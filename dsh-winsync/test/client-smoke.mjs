@@ -25,6 +25,7 @@ const fakeReact = {
   useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
   useEffect: () => {},
   useCallback: (fn) => fn,
+  useRef: (initial) => ({ current: initial }),
 }
 const fakeWindow = {
   __ModuleLoader__: {

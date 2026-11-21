@@ -98,6 +98,29 @@ assert.equal(patchedName.status, 200)
 assert.equal(patchedName.body.task.display_name, '冒烟任务')
 pass('PATCH 改名生效')
 
+/* ---------------------------------------------------------------- 全局设置 */
+
+const before = state.body.settings
+const patchedSettings = await call('/api/settings', {
+  method: 'PATCH',
+  body: JSON.stringify({ limit_up_kbps: 1234 }),
+})
+assert.equal(patchedSettings.status, 200, JSON.stringify(patchedSettings.body))
+assert.equal(patchedSettings.body.settings.limit_up_kbps, 1234)
+assert.equal(
+  patchedSettings.body.settings.log_keep_days,
+  before.log_keep_days,
+  '没传的字段必须保持不变',
+)
+pass('PATCH /api/settings 只改传入字段')
+
+const restored = await call('/api/settings', {
+  method: 'PATCH',
+  body: JSON.stringify({ limit_up_kbps: before.limit_up_kbps }),
+})
+assert.equal(restored.body.settings.limit_up_kbps, before.limit_up_kbps)
+pass('PATCH /api/settings 可还原')
+
 /* ---------------------------------------------------------------- 目录与导出 */
 
 const listed = await call(`/api/fs/list?task=${task.id}`)

@@ -37,4 +37,5 @@ sync/新建 文本文档.txt
 # dsh 插件的诊断产物：CDP 临时浏览器 profile 与截图
 dsh-winsync/test/.cdp-profile/
 dsh-winsync/test/cdp-shot.png
+dsh-winsync/test/shots/
 dsh-winsync/node_modules/

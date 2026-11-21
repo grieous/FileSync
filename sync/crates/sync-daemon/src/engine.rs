@@ -339,7 +339,7 @@ pub fn start_sync(state: &Arc<AppState>, id: &str) -> Result<(), StartError> {
             Err(e) => WorkerMsg::Done {
                 task: cfg.id.clone(),
                 report: None,
-                error: Some(format!("{e:#}")),
+                error: Some(crate::util::describe_error(&e)),
             },
         };
         let _ = worker_tx.send(msg);

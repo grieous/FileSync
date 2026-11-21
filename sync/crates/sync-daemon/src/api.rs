@@ -85,6 +85,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/api/state", get(get_state))
         .route("/api/auto", post(set_auto))
+        .route("/api/settings", axum::routing::patch(patch_settings))
         .route("/api/tasks", post(create_task))
         .route(
             "/api/tasks/:id",
@@ -163,6 +164,47 @@ async fn set_auto(State(state): State<Arc<AppState>>, Json(body): Json<AutoInput
     state.set_auto(body.on);
     state.emit(Event::State);
     Ok(Json(json!({ "ok": true, "auto": body.on })))
+}
+
+#[derive(Deserialize)]
+struct SettingsPatch {
+    auto_update: Option<bool>,
+    log_keep_count: Option<u32>,
+    log_keep_days: Option<u32>,
+    limit_up_kbps: Option<u32>,
+    limit_down_kbps: Option<u32>,
+}
+
+/// 全局设置（限速、记录保留、自动更新开关）。只改传进来的字段。
+async fn patch_settings(
+    State(state): State<Arc<AppState>>,
+    Json(patch): Json<SettingsPatch>,
+) -> ApiResult {
+    let view = {
+        let mut inner = state.inner.lock().map_err(|_| lock_err())?;
+        if let Some(v) = patch.auto_update {
+            inner.settings.auto_update = v;
+        }
+        if let Some(v) = patch.log_keep_count {
+            inner.settings.log_keep_count = v;
+        }
+        if let Some(v) = patch.log_keep_days {
+            inner.settings.log_keep_days = v;
+        }
+        if let Some(v) = patch.limit_up_kbps {
+            inner.settings.limit_up_kbps = v;
+        }
+        if let Some(v) = patch.limit_down_kbps {
+            inner.settings.limit_down_kbps = v;
+        }
+        inner
+            .settings
+            .save()
+            .map_err(|e| ApiError::internal(format!("保存配置失败：{e:#}")))?;
+        SettingsView::from(&inner.settings)
+    };
+    state.emit(Event::State);
+    Ok(Json(json!({ "ok": true, "settings": view })))
 }
 
 /* ------------------------------------------------------------------ 任务 */

@@ -5,8 +5,7 @@
 
 use sync_core::Filter;
 
-pub fn now_secs() -> i64 {
-    std::time::SystemTime::now()
+pub fn now_secs() -> i64 {    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
@@ -108,6 +107,27 @@ pub fn csv_escape(s: &str) -> String {
     }
 }
 
+/// 把 anyhow 的错误链拼成一行人话，且去掉被上层描述重复包含的段落。
+///
+/// `{e:#}` 会老老实实把整条链都拼上，而 tungstenite 这一层自己的 `Display`
+/// 已经把底层 io 错误带进去了，于是界面上会出现
+/// `连接服务器失败: IO error: … (os error 10061): … (os error 10061)`。
+pub fn describe_error(err: &anyhow::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for item in err.chain() {
+        let text = item.to_string();
+        let text = text.trim();
+        if text.is_empty() || parts.iter().any(|seen| seen.contains(text)) {
+            continue;
+        }
+        parts.push(text.to_string());
+    }
+    if parts.is_empty() {
+        return "未知错误".to_string();
+    }
+    parts.join(": ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +152,17 @@ mod tests {
         f.ignore_dotfiles = true;
         f.ignore_extensions = vec!["lnk".into(), "tmp".into()];
         assert_eq!(filter_summary(&f), "忽略点文件 · 忽略 lnk/tmp");
+    }
+
+    #[test]
+    fn error_chain_is_joined_without_repeating_itself() {
+        // 复刻真实那一条：tungstenite 的 Display 已经带上了底层 io 错误
+        let io = anyhow::anyhow!("由于目标计算机积极拒绝，无法连接。 (os error 10061)");
+        let mid = anyhow::anyhow!("IO error: {io}");
+        let top = mid.context("连接服务器失败");
+        assert_eq!(
+            describe_error(&top),
+            "连接服务器失败: IO error: 由于目标计算机积极拒绝，无法连接。 (os error 10061)"
+        );
     }
 }

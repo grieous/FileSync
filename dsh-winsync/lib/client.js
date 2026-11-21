@@ -1,19 +1,11 @@
 /**
- * dsh-winsync — browser half (P0 skeleton).
+ * dsh-winsync — browser half.
  *
- * Two registrations, both global (not session-bound):
- *   - `main` keyed slot, key `winsync` — the page that fills the centre column.
- *   - `sidebar.panellist`, id `winsync` — the icon in the left sidebar whose
- *     button selects that page. The sidebar owns the button, tooltip, label and
- *     selected state; this file only supplies the glyph.
+ * 主区面板（`main` 槽，key=winsync）+ 左侧栏图标行（`sidebar.panellist`）。
+ * 版式照 exe：180px 侧栏 + 任务 / 日志 / 设置三页；数据走 `/winsync/api`，
+ * 实时更新走 SSE（`/winsync/api/events`）——事件只做增量，`/state` 才是权威快照。
  *
- * Inside the page: the three P0 self-checks. No WinSync UI yet — P3 replaces
- * `WinsyncPage`'s body with the sidebar + task/log/settings pages.
- *
- * Hand-authored bundle: the shell materializes it through
- * `window.__ModuleLoader__.load({ id, factory })`, where `factory(require)` returns
- * this package's client exports. Only baseline modules are requested (`react`), so
- * the package needs no `dsh.client.external` entries.
+ * 手写 bundle：`window.__ModuleLoader__.load({id, factory})`，只依赖基线 `react`。
  */
 
 window.__ModuleLoader__.load({
@@ -22,97 +14,1405 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
-    /** Shared by the sidebar entry and the main panel it opens. */
     const PANEL_ID = 'winsync'
+    const API = '/winsync/api'
+    const MB = 1024 * 1024
+    const LOG_RING = 400
 
-    async function api(route, method) {
-      const response = await fetch(`/winsync/api${route}`, {
-        method: method ?? 'GET',
-        headers: { accept: 'application/json' },
+    /* ------------------------------------------------------------ 样式 */
+
+    const CSS = `
+.ws-root{position:absolute;inset:0;display:flex;background:#0E0F10;color:#EDEDEE;
+  font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","Microsoft YaHei",sans-serif;overflow:hidden;
+  container-type:inline-size}
+.ws-side{width:180px;flex:0 0 180px;background:#161719;border-right:1px solid #2A2C2E;
+  display:flex;flex-direction:column;padding:14px 12px 12px}
+.ws-brand{display:flex;align-items:center;gap:8px;padding:2px 4px 0}
+.ws-mark{width:28px;height:28px;border-radius:8px;background:#2B6CF6;color:#fff;
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px}
+.ws-brand-name{font-size:15px;font-weight:600;color:#EDEDEE}
+.ws-nav{margin-top:18px;display:flex;flex-direction:column;gap:2px}
+.ws-nav-item{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border:0;
+  border-radius:6px;background:transparent;color:#A0A2A6;font:inherit;font-size:13px;
+  cursor:pointer;text-align:left;width:100%}
+.ws-nav-item:hover{background:#232427;color:#EDEDEE}
+.ws-nav-item[data-active="true"]{background:#1E355C;color:#EDEDEE}
+.ws-nav-item:focus,.ws-btn:focus,.ws-icon-btn:focus{outline:none}
+.ws-nav-item:focus-visible,.ws-btn:focus-visible,.ws-icon-btn:focus-visible{
+  outline:2px solid #2B6CF6;outline-offset:1px}
+.ws-side-foot{margin-top:auto;padding-top:8px}
+.ws-content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.ws-scroll{overflow:auto;padding:18px 24px 32px;flex:1}
+.ws-row{display:flex;align-items:center;gap:10px}
+.ws-page-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.ws-title{font-size:18px;font-weight:600;margin:0}
+.ws-sub{color:#6E7176;font-size:12px}
+.ws-device{color:#A0A2A6;font-size:12px;margin:8px 0 14px}
+.ws-btn{appearance:none;border:1px solid #2A2C2E;background:#232427;color:#EDEDEE;
+  border-radius:6px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}
+.ws-btn:hover{background:#2A2C2E}
+.ws-btn[disabled]{opacity:.45;cursor:not-allowed}
+.ws-btn-primary{background:#2B6CF6;border-color:#2B6CF6;color:#fff}
+.ws-btn-primary:hover{background:#3B78F8}
+.ws-btn-ghost{background:transparent}
+.ws-btn-danger{color:#F0554D;border-color:#4A2320}
+.ws-btn-danger:hover{background:#2A1715}
+.ws-card{background:#1C1D1F;border:1px solid #2A2C2E;border-radius:10px;padding:14px 16px;
+  margin-bottom:12px}
+.ws-card[data-selected="true"]{border-color:#2B6CF6}
+.ws-card-head{display:flex;align-items:flex-start;gap:10px}
+.ws-folder{width:30px;height:30px;border-radius:8px;background:#232427;color:#A0A2A6;
+  display:flex;align-items:center;justify-content:center;flex:0 0 30px}
+.ws-task-name{font-size:15px;font-weight:600}
+.ws-task-state{font-size:12px}
+.ws-card-actions{margin-left:auto;display:flex;align-items:center;gap:6px}
+.ws-icon-btn{width:26px;height:26px;border-radius:13px;border:1px solid #2A2C2E;
+  background:transparent;color:#A0A2A6;cursor:pointer;display:flex;align-items:center;
+  justify-content:center;font-size:13px;line-height:1;padding:0}
+.ws-icon-btn:hover{background:#232427;color:#EDEDEE}
+.ws-menu{position:absolute;right:8px;top:34px;background:#232427;border:1px solid #2A2C2E;
+  border-radius:8px;padding:4px;min-width:112px;z-index:20;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.ws-menu button{display:block;width:100%;text-align:left;border:0;background:transparent;
+  color:#EDEDEE;font:inherit;font-size:12px;padding:6px 10px;border-radius:5px;cursor:pointer}
+.ws-menu button:hover{background:#2A2C2E}
+.ws-menu hr{border:0;border-top:1px solid #2A2C2E;margin:4px 2px}
+.ws-progress{height:6px;border-radius:3px;background:#2A2C2E;overflow:hidden;margin-top:10px}
+.ws-progress>i{display:block;height:100%;background:#2B6CF6;transition:width .2s}
+.ws-info{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px;
+  padding-top:12px;border-top:1px solid #2A2C2E}
+.ws-info dt{color:#6E7176;font-size:11px;margin:0 0 2px}
+.ws-info dd{margin:0;font-size:12px;color:#EDEDEE;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.ws-task-foot{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+.ws-issues{margin-top:8px;color:#F0554D;font-size:12px}
+.ws-empty{padding:48px 10px;text-align:center;color:#6E7176}
+.ws-empty strong{display:block;color:#EDEDEE;font-size:14px;font-weight:500;margin-bottom:6px}
+.ws-table{width:100%;border-collapse:collapse;font-size:12px}
+.ws-table th{text-align:left;color:#6E7176;font-weight:400;padding:6px 8px;
+  border-bottom:1px solid #2A2C2E;position:sticky;top:0;background:#0E0F10}
+.ws-table td{padding:6px 8px;border-bottom:1px solid #1F2124;vertical-align:top}
+.ws-table tbody tr:nth-child(even){background:#121315}
+.ws-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#A0A2A6}
+.ws-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0 12px}
+.ws-input,.ws-select{background:#1C1D1F;border:1px solid #2A2C2E;border-radius:6px;
+  color:#EDEDEE;font:inherit;font-size:12px;padding:5px 8px;min-width:0}
+.ws-input:focus,.ws-select:focus{outline:none;border-color:#2B6CF6}
+.ws-field{margin-bottom:12px}
+.ws-field label{display:block;color:#A0A2A6;font-size:12px;margin-bottom:4px}
+.ws-field .ws-input,.ws-field .ws-select{width:100%;box-sizing:border-box;padding:7px 9px}
+.ws-field .ws-num{max-width:180px}
+.ws-field .ws-hint{color:#6E7176;font-size:11px;margin-top:4px}
+.ws-overlay{position:absolute;inset:0;background:rgba(0,0,0,.55);display:flex;
+  align-items:center;justify-content:center;z-index:40}
+.ws-modal{background:#161719;border:1px solid #2A2C2E;border-radius:12px;width:min(560px,92%);
+  max-height:86%;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.6)}
+.ws-modal-head{padding:14px 18px;border-bottom:1px solid #2A2C2E;font-size:15px;font-weight:600}
+.ws-modal-body{padding:16px 18px;overflow:auto}
+.ws-modal-foot{padding:12px 18px;border-top:1px solid #2A2C2E;display:flex;
+  justify-content:flex-end;gap:8px}
+.ws-steps{display:flex;gap:8px;margin-bottom:16px}
+.ws-step{flex:1;border-top:2px solid #2A2C2E;padding-top:6px;color:#6E7176;font-size:11px}
+.ws-step[data-on="true"]{border-color:#2B6CF6;color:#EDEDEE}
+.ws-toast{position:absolute;left:50%;transform:translateX(-50%);bottom:18px;z-index:60;
+  background:#232427;border:1px solid #2A2C2E;border-radius:8px;padding:8px 14px;
+  font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45);max-width:70%}
+.ws-toast[data-tone="bad"]{border-color:#5A2A26;color:#FFB4AF}
+.ws-toast[data-tone="ok"]{border-color:#25503C;color:#9BE3BF}
+.ws-banner{padding:8px 12px;border-radius:8px;font-size:12px;
+  background:#2A2318;border:1px solid #4A3A18;color:#E6A23C;display:flex;gap:10px;align-items:center}
+.ws-raw{position:absolute;right:16px;bottom:16px;width:min(520px,60%);max-height:46%;
+  background:#161719;border:1px solid #2A2C2E;border-radius:10px;display:flex;
+  flex-direction:column;z-index:50;box-shadow:0 18px 40px rgba(0,0,0,.55)}
+.ws-raw-head{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;
+  border-bottom:1px solid #2A2C2E;font-size:12px;color:#A0A2A6}
+.ws-raw-body{overflow:auto;padding:8px 12px;font-family:ui-monospace,Consolas,monospace;
+  font-size:11px;color:#A0A2A6;white-space:pre-wrap;word-break:break-all}
+.ws-link{color:#5B92FF;cursor:pointer;background:none;border:0;font:inherit;padding:0}
+
+/* 面板宽度取决于 dsh 的分栏，不跟视口走，所以用容器查询而不是媒体查询 */
+@container (max-width: 820px){
+  .ws-info{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ws-raw{width:min(520px,84%)}
+}
+@container (max-width: 640px){
+  .ws-side{width:132px;flex-basis:132px;padding:12px 8px 10px}
+  .ws-brand-name{display:none}
+  .ws-info{grid-template-columns:minmax(0,1fr);gap:8px}
+  .ws-scroll{padding:14px 14px 24px}
+  .ws-raw{width:calc(100% - 24px);right:12px}
+}
+`
+
+    let stylesInjected = false
+    function ensureStyles() {
+      if (stylesInjected || typeof document === 'undefined') return
+      const tag = document.createElement('style')
+      tag.setAttribute('data-winsync', '')
+      tag.textContent = CSS
+      document.head.appendChild(tag)
+      stylesInjected = true
+    }
+
+    /* ------------------------------------------------------------ 基础工具 */
+
+    class ApiError extends Error {
+      constructor(code, message, body) {
+        super(message)
+        this.code = code
+        this.body = body
+      }
+    }
+
+    async function api(route, { method = 'GET', body, query } = {}) {
+      const search = query ? `?${new URLSearchParams(query).toString()}` : ''
+      const response = await fetch(`${API}${route}${search}`, {
+        method,
+        headers: {
+          accept: 'application/json',
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
       })
       const text = await response.text()
-      let body
+      let parsed
       try {
-        body = JSON.parse(text)
+        parsed = text === '' ? null : JSON.parse(text)
       } catch {
-        body = { raw: text }
+        parsed = { raw: text }
       }
-      if (!response.ok) {
-        const message = body?.error?.message ?? `HTTP ${response.status}`
-        const error = new Error(message)
-        error.body = body
-        throw error
+      if (!response.ok || parsed?.ok === false) {
+        const code = parsed?.error?.code ?? `http-${response.status}`
+        const message = parsed?.error?.message ?? `HTTP ${response.status}`
+        throw new ApiError(code, message, parsed)
       }
-      return body
+      return parsed
     }
 
-    const styles = {
-      root: {
-        boxSizing: 'border-box',
-        height: '100%',
-        overflow: 'auto',
-        padding: '28px 32px 40px',
-        font: '13px/1.55 ui-sans-serif, system-ui, "Segoe UI", sans-serif',
-        color: 'inherit',
-      },
-      title: { margin: '0 0 4px', fontSize: 16, fontWeight: 600 },
-      hint: { margin: '0 0 20px', opacity: 0.62 },
-      card: {
-        border: '1px solid color-mix(in srgb, currentColor 16%, transparent)',
-        borderRadius: 10,
-        padding: '14px 16px',
-        marginBottom: 14,
-        maxWidth: 760,
-      },
-      row: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' },
-      button: {
-        appearance: 'none',
-        border: '1px solid color-mix(in srgb, currentColor 22%, transparent)',
-        background: 'color-mix(in srgb, currentColor 8%, transparent)',
-        color: 'inherit',
-        borderRadius: 7,
-        padding: '5px 12px',
-        font: 'inherit',
-        cursor: 'pointer',
-      },
-      code: {
-        font: '12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace',
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-all',
-        margin: '10px 0 0',
-        opacity: 0.86,
-      },
-      pill: (tone) => ({
-        display: 'inline-block',
-        borderRadius: 999,
-        padding: '1px 9px',
-        fontSize: 12,
-        border: '1px solid currentColor',
-        color:
-          tone === 'ok'
-            ? '#3fb950'
-            : tone === 'bad'
-              ? '#f85149'
-              : tone === 'busy'
-                ? '#d29922'
-                : 'inherit',
-        opacity: tone === 'idle' ? 0.6 : 1,
-      }),
+    const pad = (n) => String(n).padStart(2, '0')
+    function fmtTime(secs) {
+      if (!secs) return '—'
+      const d = new Date(secs * 1000)
+      return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    }
+    function fmtFull(secs) {
+      if (!secs) return '—'
+      const d = new Date(secs * 1000)
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(
+        d.getMinutes(),
+      )}:${pad(d.getSeconds())}`
+    }
+    function modeLabel(mode) {
+      return mode === 'upload_only' ? '仅上传' : mode === 'download_only' ? '仅下载' : '双向'
+    }
+    function shortServer(server) {
+      return String(server ?? '')
+        .replace(/^wss?:\/\//, '')
+        .replace(/\/ws$/, '')
+    }
+    function statusOf(task) {
+      const rt = task.runtime ?? {}
+      if (rt.running) return { text: '同步中…', tone: '#E6A23C' }
+      if (task.paused) return { text: '已暂停', tone: '#6E7176' }
+      if (rt.last_error) return { text: '同步失败', tone: '#F0554D' }
+      if (rt.last) return { text: rt.last.up_to_date ? '两端已一致' : '同步完成', tone: '#4CC38A' }
+      return { text: '等待同步', tone: '#6E7176' }
     }
 
-    function Card({ title, children }) {
+    /* ------------------------------------------------------------ store */
+
+    function useStore() {
+      const [data, setData] = React.useState(null)
+      const [error, setError] = React.useState(null)
+      const [connected, setConnected] = React.useState(false)
+      const [toast, setToast] = React.useState(null)
+      const [rawTask, setRawTask] = React.useState(null)
+      const toastTimer = React.useRef(null)
+
+      const notify = React.useCallback((text, tone = 'ok') => {
+        setToast({ text, tone })
+        if (toastTimer.current) clearTimeout(toastTimer.current)
+        toastTimer.current = setTimeout(() => setToast(null), 3600)
+      }, [])
+
+      const refresh = React.useCallback(async () => {
+        try {
+          const body = await api('/state')
+          setData(body)
+          setError(null)
+        } catch (e) {
+          setError(e)
+        }
+      }, [])
+
+      const patchRuntime = React.useCallback((taskId, fn) => {
+        setData((prev) => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            tasks: prev.tasks.map((t) =>
+              t.id === taskId ? { ...t, runtime: fn(t.runtime ?? {}) } : t,
+            ),
+          }
+        })
+      }, [])
+
+      React.useEffect(() => {
+        void refresh()
+      }, [refresh])
+
+      React.useEffect(() => {
+        let closed = false
+        let source = null
+        let retry = 400
+        let retryTimer = null
+
+        const connect = () => {
+          if (closed) return
+          source = new EventSource(`${API}/events`)
+          source.onopen = () => {
+            retry = 400
+            setConnected(true)
+          }
+          source.addEventListener('hello', () => setConnected(true))
+          source.addEventListener('state', () => void refresh())
+          source.addEventListener('log', (event) => {
+            const payload = JSON.parse(event.data)
+            patchRuntime(payload.task, (rt) => {
+              const logs = [...(rt.logs ?? []), payload.line]
+              if (logs.length > LOG_RING) logs.splice(0, logs.length - LOG_RING)
+              return { ...rt, logs }
+            })
+          })
+          source.addEventListener('progress', (event) => {
+            const payload = JSON.parse(event.data)
+            patchRuntime(payload.task, (rt) => ({
+              ...rt,
+              running: true,
+              progress: { done: payload.done, total: payload.total, what: payload.what },
+            }))
+          })
+          source.addEventListener('done', (event) => {
+            const payload = JSON.parse(event.data)
+            patchRuntime(payload.task, (rt) => ({
+              ...rt,
+              running: false,
+              progress: null,
+              last: payload.report ?? rt.last ?? null,
+              last_error: payload.error ?? null,
+              last_time: Math.floor(Date.now() / 1000),
+            }))
+            void refresh()
+          })
+          source.addEventListener('lagged', () => void refresh())
+          source.onerror = () => {
+            setConnected(false)
+            source?.close()
+            if (closed) return
+            retryTimer = setTimeout(connect, retry)
+            retry = Math.min(retry * 2, 8000)
+          }
+        }
+
+        connect()
+        const onVisible = () => {
+          if (document.visibilityState === 'visible') void refresh()
+        }
+        document.addEventListener('visibilitychange', onVisible)
+        return () => {
+          closed = true
+          if (retryTimer) clearTimeout(retryTimer)
+          document.removeEventListener('visibilitychange', onVisible)
+          source?.close()
+        }
+      }, [patchRuntime, refresh])
+
+      const run = React.useCallback(
+        async (work, successText) => {
+          try {
+            const result = await work()
+            if (successText) notify(successText, 'ok')
+            await refresh()
+            return result
+          } catch (e) {
+            notify(e?.message ?? String(e), 'bad')
+            throw e
+          }
+        },
+        [notify, refresh],
+      )
+
+      return {
+        data,
+        error,
+        connected,
+        toast,
+        notify,
+        refresh,
+        run,
+        rawTask,
+        showRawLog: setRawTask,
+        closeRawLog: () => setRawTask(null),
+      }
+    }
+
+    /* ------------------------------------------------------------ 小图标 */
+
+    const IconFolder = () =>
+      h(
+        'svg',
+        { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'currentColor', 'aria-hidden': 'true' },
+        h('path', {
+          d: 'M2 4.2c0-.6.5-1 1-1h3l1.2 1.3H13c.6 0 1 .4 1 1v6.3c0 .6-.4 1-1 1H3c-.5 0-1-.4-1-1V4.2Z',
+        }),
+      )
+
+    const IconPause = () =>
+      h(
+        'svg',
+        { width: 11, height: 11, viewBox: '0 0 12 12', fill: 'currentColor', 'aria-hidden': 'true' },
+        h('rect', { x: 2.4, y: 1.8, width: 2.6, height: 8.4, rx: 1 }),
+        h('rect', { x: 7, y: 1.8, width: 2.6, height: 8.4, rx: 1 }),
+      )
+
+    const IconPlay = () =>
+      h(
+        'svg',
+        { width: 11, height: 11, viewBox: '0 0 12 12', fill: 'currentColor', 'aria-hidden': 'true' },
+        h('path', { d: 'M3.6 2.1 9.6 6l-6 3.9V2.1Z' }),
+      )
+
+    const IconMore = () =>
+      h(
+        'svg',
+        { width: 14, height: 4, viewBox: '0 0 14 4', fill: 'currentColor', 'aria-hidden': 'true' },
+        h('circle', { cx: 2, cy: 2, r: 1.25 }),
+        h('circle', { cx: 7, cy: 2, r: 1.25 }),
+        h('circle', { cx: 12, cy: 2, r: 1.25 }),
+      )
+
+    /* ------------------------------------------------------------ 任务卡 */
+
+    function TaskCard({ task, onEdit, onSync, onPause, onOpenDir, onDelete, onShowLog }) {
+      const [menu, setMenu] = React.useState(false)
+      const status = statusOf(task)
+      const rt = task.runtime ?? {}
+      const progress = rt.progress
+      const frac = progress && progress.total > 0 ? progress.done / progress.total : 0
+      const canSync = !rt.running && (task.issues ?? []).length === 0
+
       return h(
-        'section',
-        { style: styles.card },
-        h('div', { style: { fontWeight: 600, marginBottom: 8 } }, title),
-        children,
+        'div',
+        {
+          className: 'ws-card',
+          'data-selected': menu ? 'true' : 'false',
+          style: { position: 'relative' },
+        },
+        h(
+          'div',
+          { className: 'ws-card-head' },
+          h('div', { className: 'ws-folder' }, h(IconFolder)),
+          h(
+            'div',
+            { style: { minWidth: 0 } },
+            h('div', { className: 'ws-task-name' }, task.display_name),
+            h('div', { className: 'ws-task-state', style: { color: status.tone } }, status.text),
+          ),
+          h(
+            'div',
+            { className: 'ws-card-actions' },
+            h(
+              'button',
+              {
+                className: 'ws-icon-btn',
+                title: task.paused ? '恢复自动同步' : '暂停自动同步',
+                onClick: () => onPause(task),
+              },
+              task.paused ? h(IconPlay) : h(IconPause),
+            ),
+            h(
+              'button',
+              { className: 'ws-icon-btn', title: '更多', onClick: () => setMenu((v) => !v) },
+              h(IconMore),
+            ),
+          ),
+        ),
+        menu
+          ? h(
+              'div',
+              { className: 'ws-menu' },
+              h('button', { onClick: () => { setMenu(false); onEdit(task) } }, '设置'),
+              h('button', { onClick: () => { setMenu(false); onOpenDir(task) } }, '打开目录'),
+              h('button', { onClick: () => { setMenu(false); onShowLog(task) } }, '查看日志'),
+              h('hr'),
+              h('button', { onClick: () => { setMenu(false); onDelete(task) } }, '删除任务'),
+            )
+          : null,
+        progress
+          ? h(
+              'div',
+              null,
+              h(
+                'div',
+                { className: 'ws-progress' },
+                h('i', { style: { width: `${Math.round(frac * 100)}%` } }),
+              ),
+              h(
+                'div',
+                { className: 'ws-sub', style: { marginTop: 4 } },
+                `${progress.done}/${progress.total} · ${progress.what}`,
+              ),
+            )
+          : null,
+        h(
+          'dl',
+          { className: 'ws-info' },
+          h('div', null, h('dt', null, '电脑文件路径'), h('dd', { title: task.root }, task.root || '—')),
+          h(
+            'div',
+            null,
+            h('dt', null, '目标房间'),
+            h('dd', null, `${task.server_short || shortServer(task.server)} / ${task.workspace}`),
+          ),
+          h(
+            'div',
+            null,
+            h('dt', null, '规则设置'),
+            h('dd', null, `${modeLabel(task.mode)} · ${task.filter_summary}`),
+          ),
+        ),
+        (task.issues ?? []).length > 0
+          ? h('div', { className: 'ws-issues' }, task.issues.join('；'))
+          : null,
+        h(
+          'div',
+          { className: 'ws-task-foot' },
+          h(
+            'button',
+            {
+              className: 'ws-btn ws-btn-primary',
+              disabled: !canSync,
+              title: rt.running ? '正在同步' : (task.issues ?? []).length > 0 ? '先修正配置问题' : '',
+              onClick: () => onSync(task),
+            },
+            rt.running ? '同步中…' : '立即同步',
+          ),
+          h(
+            'span',
+            { className: 'ws-sub' },
+            rt.last_time ? `上次同步 ${fmtTime(rt.last_time)}` : '还没同步过',
+          ),
+          rt.next_auto_in !== undefined && !task.paused
+            ? h('span', { className: 'ws-sub' }, `· ${rt.next_auto_in}s 后自动`)
+            : null,
+          rt.last
+            ? h(
+                'span',
+                { className: 'ws-sub' },
+                `· 推送 ${rt.last.pushed} 拉取 ${rt.last.pulled} 删除 ${rt.last.deleted} 冲突 ${rt.last.conflicts}`,
+              )
+            : null,
+        ),
+        rt.last_error ? h('div', { className: 'ws-issues' }, rt.last_error) : null,
       )
     }
 
-    /**
-     * Sidebar glyph: two arrows chasing each other. Drawn at the edge the
-     * sidebar asks for, in `currentColor` so it inherits the row's state colour.
-     */
+    /* ------------------------------------------------------------ 任务页 */
+
+    function TasksPage({ store, onCreate, onEdit }) {
+      const data = store.data
+      const tasks = data?.tasks ?? []
+      const first = tasks[0]
+
+      const sync = (task) =>
+        store.run(
+          () => api(`/tasks/${encodeURIComponent(task.id)}/sync`, { method: 'POST' }),
+          '已开始同步',
+        )
+
+      const pause = (task) =>
+        store.run(
+          () =>
+            api(`/tasks/${encodeURIComponent(task.id)}/${task.paused ? 'resume' : 'pause'}`, {
+              method: 'POST',
+            }),
+          task.paused ? '已恢复自动同步' : '已暂停自动同步',
+        )
+
+      const openDir = (task) =>
+        store.run(() => api('/open-dir', { method: 'POST', body: { task: task.id } }))
+
+      const remove = (task) => {
+        const ok = window.confirm(
+          `删除任务「${task.display_name}」？\n\n配置会被移除，历史记录库 tasks/${task.id}.db 会保留。`,
+        )
+        if (!ok) return
+        void store.run(
+          () => api(`/tasks/${encodeURIComponent(task.id)}`, { method: 'DELETE' }),
+          '任务已删除',
+        )
+      }
+
+      const toggleAuto = (on) =>
+        store.run(
+          () => api('/auto', { method: 'POST', body: { on } }),
+          on ? '已开启自动同步' : '已暂停自动同步',
+        )
+
+      return h(
+        'div',
+        { className: 'ws-scroll' },
+        h(
+          'div',
+          { className: 'ws-page-head' },
+          h('h2', { className: 'ws-title' }, '同步任务'),
+          h(
+            'div',
+            { className: 'ws-row' },
+            h(
+              'label',
+              { className: 'ws-sub', style: { display: 'flex', alignItems: 'center', gap: 6 } },
+              h('input', {
+                type: 'checkbox',
+                checked: data?.auto ?? true,
+                onChange: (e) => void toggleAuto(e.target.checked),
+              }),
+              '自动同步',
+            ),
+            h('button', { className: 'ws-btn ws-btn-primary', onClick: onCreate }, '+ 创建同步任务'),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'ws-device' },
+          first
+            ? `🖥  ${data?.device ?? '本机'}  |  ${shortServer(first.server)}  ·  房间 ${first.workspace}`
+            : `🖥  ${data?.device ?? '本机'}`,
+        ),
+        tasks.length === 0
+          ? h(
+              'div',
+              { className: 'ws-empty' },
+              h('strong', null, '还没有同步任务'),
+              '点右上角「+ 创建同步任务」，三步即可开始',
+            )
+          : tasks.map((task) =>
+              h(TaskCard, {
+                key: task.id,
+                task,
+                onEdit,
+                onSync: sync,
+                onPause: pause,
+                onOpenDir: openDir,
+                onDelete: remove,
+                onShowLog: (t) => store.showRawLog(t.id),
+              }),
+            ),
+      )
+    }
+
+    /* ------------------------------------------------------------ 日志页 */
+
+    function LogsPage({ store }) {
+      const tasks = store.data?.tasks ?? []
+      const [task, setTask] = React.useState('all')
+      const [status, setStatus] = React.useState('all')
+      const [q, setQ] = React.useState('')
+      const [rows, setRows] = React.useState([])
+      const [loading, setLoading] = React.useState(false)
+      const notify = store.notify
+
+      const load = React.useCallback(async () => {
+        setLoading(true)
+        try {
+          const body = await api('/activities', {
+            query: { task, status, limit: '500', ...(q.trim() ? { q: q.trim() } : {}) },
+          })
+          setRows(body.rows ?? [])
+        } catch (e) {
+          notify(e.message, 'bad')
+        } finally {
+          setLoading(false)
+        }
+      }, [notify, q, status, task])
+
+      React.useEffect(() => {
+        const timer = setTimeout(() => void load(), 200)
+        return () => clearTimeout(timer)
+      }, [load])
+
+      const exportCsv = () => {
+        const params = new URLSearchParams({ task, status })
+        if (q.trim()) params.set('q', q.trim())
+        window.open(`${API}/export.csv?${params.toString()}`, '_blank')
+      }
+
+      const clear = () => {
+        const label =
+          task === 'all' ? '全部任务' : tasks.find((t) => t.id === task)?.display_name ?? task
+        if (!window.confirm(`清空${label}的同步记录？此操作不可撤销（不影响已同步的文件）。`)) return
+        void store
+          .run(() => api('/activities', { method: 'DELETE', query: { task } }), '记录已清空')
+          .then(load)
+      }
+
+      return h(
+        'div',
+        { className: 'ws-scroll', style: { display: 'flex', flexDirection: 'column' } },
+        h('h2', { className: 'ws-title' }, '同步日志'),
+        h(
+          'div',
+          { className: 'ws-toolbar' },
+          h(
+            'select',
+            { className: 'ws-select', value: task, onChange: (e) => setTask(e.target.value) },
+            h('option', { value: 'all' }, '全部任务'),
+            tasks.map((t) => h('option', { key: t.id, value: t.id }, t.display_name)),
+          ),
+          h(
+            'select',
+            { className: 'ws-select', value: status, onChange: (e) => setStatus(e.target.value) },
+            h('option', { value: 'all' }, '全部状态'),
+            h('option', { value: 'ok' }, '成功'),
+            h('option', { value: 'fail' }, '失败'),
+          ),
+          h('input', {
+            className: 'ws-input',
+            placeholder: '搜索文件名或说明',
+            value: q,
+            onChange: (e) => setQ(e.target.value),
+            style: { flex: '1 1 180px' },
+          }),
+          h('button', { className: 'ws-btn', onClick: () => void load() }, loading ? '刷新中…' : '刷新'),
+          h('button', { className: 'ws-btn', onClick: exportCsv }, '导出 CSV'),
+          h('button', { className: 'ws-btn ws-btn-danger', onClick: clear }, '清空'),
+        ),
+        rows.length === 0
+          ? h(
+              'div',
+              { className: 'ws-empty' },
+              h('strong', null, '暂无记录'),
+              '同步过文件之后，这里会逐条列出',
+            )
+          : h(
+              'table',
+              { className: 'ws-table' },
+              h(
+                'thead',
+                null,
+                h(
+                  'tr',
+                  null,
+                  ['时间', '任务', '文件', '动作', '状态', '说明'].map((label) =>
+                    h('th', { key: label }, label),
+                  ),
+                ),
+              ),
+              h(
+                'tbody',
+                null,
+                rows.map((row, index) =>
+                  h(
+                    'tr',
+                    { key: `${row.created_at}-${index}` },
+                    h('td', { className: 'ws-mono' }, fmtFull(row.created_at)),
+                    h('td', null, row.task),
+                    h('td', { className: 'ws-mono', title: row.path }, row.path),
+                    h('td', null, row.action),
+                    h(
+                      'td',
+                      { style: { color: row.ok ? '#4CC38A' : '#F0554D' } },
+                      row.ok ? '成功' : '失败',
+                    ),
+                    h('td', { title: row.message }, row.message),
+                  ),
+                ),
+              ),
+            ),
+      )
+    }
+
+    /* ------------------------------------------------------------ 设置页 */
+
+    function SettingsPage({ store }) {
+      const data = store.data
+      const settings = data?.settings ?? {}
+      const [form, setForm] = React.useState(null)
+      const [autostart, setAutostart] = React.useState(null)
+      const [diag, setDiag] = React.useState(null)
+
+      React.useEffect(() => {
+        setForm({
+          limit_up_kbps: settings.limit_up_kbps ?? 0,
+          limit_down_kbps: settings.limit_down_kbps ?? 0,
+          log_keep_days: settings.log_keep_days ?? 30,
+          log_keep_count: settings.log_keep_count ?? 0,
+        })
+      }, [
+        settings.limit_up_kbps,
+        settings.limit_down_kbps,
+        settings.log_keep_days,
+        settings.log_keep_count,
+      ])
+
+      React.useEffect(() => {
+        api('/autostart')
+          .then((body) => setAutostart(body.on))
+          .catch(() => setAutostart(null))
+      }, [])
+
+      const save = () =>
+        store.run(
+          () =>
+            api('/settings', {
+              method: 'PATCH',
+              body: {
+                limit_up_kbps: Number(form.limit_up_kbps) || 0,
+                limit_down_kbps: Number(form.limit_down_kbps) || 0,
+                log_keep_days: Number(form.log_keep_days) || 0,
+                log_keep_count: Number(form.log_keep_count) || 0,
+              },
+            }),
+          '设置已保存',
+        )
+
+      const toggleAutostart = (on) => {
+        setAutostart(on)
+        void store.run(
+          () => api('/autostart', { method: 'POST', body: { on } }),
+          on ? '已开启开机自启' : '已关闭开机自启',
+        )
+      }
+
+      const pruneNow = () =>
+        void store.run(() => api('/prune', { method: 'POST' }), '已按保留策略清理')
+
+      const probe = async () => {
+        try {
+          setDiag(await api('/diag'))
+        } catch (e) {
+          setDiag({ error: { message: e.message, code: e.code } })
+        }
+      }
+
+      const field = (label, key, hint) =>
+        h(
+          'div',
+          { className: 'ws-field' },
+          h('label', null, label),
+          h('input', {
+            className: 'ws-input ws-num',
+            type: 'number',
+            min: 0,
+            value: form?.[key] ?? 0,
+            onChange: (e) => setForm({ ...form, [key]: e.target.value }),
+          }),
+          hint ? h('div', { className: 'ws-hint' }, hint) : null,
+        )
+
+      return h(
+        'div',
+        { className: 'ws-scroll' },
+        h('h2', { className: 'ws-title' }, '设置'),
+        h(
+          'div',
+          { className: 'ws-sub', style: { margin: '4px 0 14px' } },
+          `版本 ${data?.version ?? '—'} · 状态目录 ${data?.data_dir ?? '—'}`,
+        ),
+        h(
+          'section',
+          { className: 'ws-card' },
+          h('div', { style: { fontWeight: 600, marginBottom: 10 } }, '启动与常驻'),
+          h(
+            'label',
+            { className: 'ws-row', style: { gap: 8 } },
+            h('input', {
+              type: 'checkbox',
+              checked: autostart === true,
+              disabled: autostart === null,
+              onChange: (e) => toggleAutostart(e.target.checked),
+            }),
+            h('span', null, '开机时自动启动同步服务'),
+          ),
+          h(
+            'div',
+            { className: 'ws-sub', style: { marginTop: 6 } },
+            '注册表值 WinSyncDaemon，与 exe 的 WinSync 分开；关掉后随 dsh 退出即停。',
+          ),
+        ),
+        h(
+          'section',
+          { className: 'ws-card' },
+          h('div', { style: { fontWeight: 600, marginBottom: 10 } }, '限速（KB/s，0 = 不限）'),
+          h(
+            'div',
+            { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 } },
+            field('上传限速', 'limit_up_kbps'),
+            field('下载限速', 'limit_down_kbps'),
+          ),
+        ),
+        h(
+          'section',
+          { className: 'ws-card' },
+          h('div', { style: { fontWeight: 600, marginBottom: 10 } }, '记录保留'),
+          h(
+            'div',
+            { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 } },
+            field('保留天数', 'log_keep_days', '0 = 永久'),
+            field('每个任务保留条数', 'log_keep_count', '0 = 不限'),
+          ),
+          h(
+            'div',
+            { className: 'ws-row', style: { marginTop: 4 } },
+            h('button', { className: 'ws-btn', onClick: pruneNow }, '立即按策略清理'),
+          ),
+        ),
+        h(
+          'section',
+          { className: 'ws-card', style: { marginTop: 14 } },
+          h('div', { style: { fontWeight: 600, marginBottom: 10 } }, '诊断'),
+          h(
+            'div',
+            { className: 'ws-row' },
+            h('button', { className: 'ws-btn', onClick: () => void probe() }, '检查同步服务'),
+            h('span', { className: 'ws-sub' }, '不改任何数据，只读一次 /health 与握手文件'),
+          ),
+          diag
+            ? h(
+                'pre',
+                {
+                  className: 'ws-mono',
+                  style: {
+                    marginTop: 10,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-all',
+                    color: '#A0A2A6',
+                  },
+                },
+                JSON.stringify(diag, null, 2),
+              )
+            : null,
+        ),
+        h(
+          'div',
+          { className: 'ws-row', style: { justifyContent: 'flex-end', marginTop: 4 } },
+          h(
+            'button',
+            { className: 'ws-btn ws-btn-primary', onClick: () => void save(), disabled: form === null },
+            '保存设置',
+          ),
+        ),
+      )
+    }
+
+    /* ------------------------------------------------------------ 任务编辑器 */
+
+    function TaskEditor({ task, onClose, store }) {
+      const [form, setForm] = React.useState({
+        name: task.name,
+        server: task.server,
+        token: '',
+        workspace: task.workspace,
+        root: task.root,
+        mode: task.mode,
+        dotfiles: task.filter?.ignore_dotfiles ?? false,
+        ext: (task.filter?.ignore_extensions ?? []).join(','),
+        minMb: task.filter?.size_min ? task.filter.size_min / MB : 0,
+        maxMb: task.filter?.size_max ? task.filter.size_max / MB : 0,
+      })
+      const [busy, setBusy] = React.useState(false)
+
+      const body = (force) => ({
+        name: form.name,
+        server: form.server,
+        token: form.token,
+        workspace: form.workspace,
+        root: form.root,
+        mode: form.mode,
+        filter: {
+          ignore_dotfiles: form.dotfiles,
+          ignore_extensions: String(form.ext)
+            .split(',')
+            .map((s) => s.trim().replace(/^\./, ''))
+            .filter(Boolean),
+          size_min: Number(form.minMb) > 0 ? Math.round(Number(form.minMb) * MB) : null,
+          size_max: Number(form.maxMb) > 0 ? Math.round(Number(form.maxMb) * MB) : null,
+        },
+        ...(force ? { force: true } : {}),
+      })
+
+      const submit = async () => {
+        const changedRoot = form.root.trim() !== task.root
+        if (changedRoot) {
+          const ok = window.confirm(
+            '更换同步目录会清空本地共识快照，下次同步按全量重建。\n\n继续？',
+          )
+          if (!ok) return
+        }
+        setBusy(true)
+        try {
+          await store.run(
+            () =>
+              api(`/tasks/${encodeURIComponent(task.id)}`, {
+                method: 'PATCH',
+                body: body(changedRoot),
+              }),
+            '已保存',
+          )
+          onClose()
+        } catch {
+          /* toast 已经提示过 */
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const input = (label, key, options = {}) =>
+        h(
+          'div',
+          { className: 'ws-field' },
+          h('label', null, label),
+          h('input', {
+            className: 'ws-input',
+            value: form[key] ?? '',
+            type: options.type ?? 'text',
+            placeholder: options.placeholder ?? '',
+            onChange: (e) => setForm({ ...form, [key]: e.target.value }),
+          }),
+          options.hint ? h('div', { className: 'ws-hint' }, options.hint) : null,
+        )
+
+      return h(
+        'div',
+        { className: 'ws-overlay', onMouseDown: (e) => e.target === e.currentTarget && onClose() },
+        h(
+          'div',
+          { className: 'ws-modal' },
+          h('div', { className: 'ws-modal-head' }, `设置 · ${task.display_name}`),
+          h(
+            'div',
+            { className: 'ws-modal-body' },
+            input('任务名称', 'name', { placeholder: '留空则用目录名' }),
+            input('服务器地址', 'server', { placeholder: 'ws://192.168.3.222:18443/ws' }),
+            input('密钥', 'token', {
+              type: 'password',
+              placeholder: task.has_token ? '已设置（留空表示不修改）' : '未设置',
+            }),
+            input('房间名', 'workspace', { hint: '两台设备必须相同' }),
+            input('本机目录', 'root', { hint: '必须是已存在的绝对路径' }),
+            h(
+              'div',
+              { className: 'ws-field' },
+              h('label', null, '同步方向'),
+              h(
+                'select',
+                {
+                  className: 'ws-select',
+                  value: form.mode,
+                  onChange: (e) => setForm({ ...form, mode: e.target.value }),
+                },
+                h('option', { value: 'bidirectional' }, '双向同步'),
+                h('option', { value: 'upload_only' }, '仅上传（本机 → 对端）'),
+                h('option', { value: 'download_only' }, '仅下载（对端 → 本机）'),
+              ),
+            ),
+            h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '过滤规则'),
+            h(
+              'label',
+              { className: 'ws-row', style: { gap: 8, marginBottom: 10 } },
+              h('input', {
+                type: 'checkbox',
+                checked: form.dotfiles,
+                onChange: (e) => setForm({ ...form, dotfiles: e.target.checked }),
+              }),
+              h('span', null, '忽略点文件（.git、.DS_Store 等）'),
+            ),
+            input('忽略扩展名', 'ext', { placeholder: '例如 lnk,tmp（逗号分隔）' }),
+            h(
+              'div',
+              { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 } },
+              input('最小大小（MB）', 'minMb', { type: 'number' }),
+              input('最大大小（MB）', 'maxMb', { type: 'number' }),
+            ),
+            h(
+              'div',
+              { style: { color: '#6E7176', fontSize: 11 } },
+              '过滤规则两端必须一致，否则会互相误判删除。',
+            ),
+          ),
+          h(
+            'div',
+            { className: 'ws-modal-foot' },
+            h('button', { className: 'ws-btn ws-btn-ghost', onClick: onClose }, '取消'),
+            h(
+              'button',
+              { className: 'ws-btn ws-btn-primary', disabled: busy, onClick: () => void submit() },
+              busy ? '保存中…' : '保存',
+            ),
+          ),
+        ),
+      )
+    }
+
+    /* ------------------------------------------------------------ 创建向导 */
+
+    function Wizard({ onClose, store }) {
+      const [step, setStep] = React.useState(0)
+      const [busy, setBusy] = React.useState(false)
+      const [form, setForm] = React.useState({
+        server: 'ws://127.0.0.1:18443/ws',
+        token: '',
+        workspace: 'default',
+        root: '',
+        name: '',
+        mode: 'bidirectional',
+        dotfiles: false,
+        ext: '',
+      })
+
+      const issues = []
+      if (!/^wss?:\/\//.test(form.server.trim())) issues.push('服务器地址要以 ws:// 或 wss:// 开头')
+      if (!form.token.trim()) issues.push('未填写密钥')
+      if (!form.workspace.trim()) issues.push('未填写房间名')
+      if (step >= 1) {
+        if (!form.root.trim()) issues.push('未选择同步目录')
+        else if (!/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(form.root.trim())) {
+          issues.push('需要填绝对路径，例如 D:\\Sync')
+        }
+      }
+
+      const create = async () => {
+        setBusy(true)
+        try {
+          await store.run(
+            () =>
+              api('/tasks', {
+                method: 'POST',
+                body: {
+                  name: form.name,
+                  server: form.server,
+                  token: form.token,
+                  workspace: form.workspace,
+                  root: form.root,
+                  mode: form.mode,
+                  filter: {
+                    ignore_dotfiles: form.dotfiles,
+                    ignore_extensions: String(form.ext)
+                      .split(',')
+                      .map((s) => s.trim().replace(/^\./, ''))
+                      .filter(Boolean),
+                    size_min: null,
+                    size_max: null,
+                  },
+                },
+              }),
+            '任务已创建',
+          )
+          onClose()
+        } catch {
+          /* toast 已提示 */
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const stepBar = h(
+        'div',
+        { className: 'ws-steps' },
+        ['1 服务器', '2 本机目录', '3 确认'].map((label, index) =>
+          h(
+            'div',
+            { key: label, className: 'ws-step', 'data-on': index <= step ? 'true' : 'false' },
+            label,
+          ),
+        ),
+      )
+
+      const body = () => {
+        if (step === 0) {
+          return h(
+            'div',
+            null,
+            h(
+              'div',
+              { className: 'ws-field' },
+              h('label', null, '服务器地址'),
+              h('input', {
+                className: 'ws-input',
+                value: form.server,
+                onChange: (e) => setForm({ ...form, server: e.target.value }),
+              }),
+              h('div', { className: 'ws-hint' }, '中继地址，通常以 /ws 结尾'),
+            ),
+            h(
+              'div',
+              { className: 'ws-field' },
+              h('label', null, '密钥'),
+              h('input', {
+                className: 'ws-input',
+                type: 'password',
+                value: form.token,
+                onChange: (e) => setForm({ ...form, token: e.target.value }),
+              }),
+              h('div', { className: 'ws-hint' }, '与服务端的 SYNC_TOKEN 完全一致'),
+            ),
+            h(
+              'div',
+              { className: 'ws-field' },
+              h('label', null, '房间名'),
+              h('input', {
+                className: 'ws-input',
+                value: form.workspace,
+                onChange: (e) => setForm({ ...form, workspace: e.target.value }),
+              }),
+              h('div', { className: 'ws-hint' }, '两台设备必须相同，例如 default'),
+            ),
+          )
+        }
+        if (step === 1) {
+          return h(
+            'div',
+            null,
+            h(
+              'div',
+              { className: 'ws-field' },
+              h('label', null, '本机同步目录'),
+              h('input', {
+                className: 'ws-input',
+                value: form.root,
+                placeholder: 'D:\\Sync',
+                onChange: (e) => setForm({ ...form, root: e.target.value }),
+              }),
+              h(
+                'div',
+                { className: 'ws-hint' },
+                '必须是已存在的绝对路径。浏览器拿不到系统目录选择框，请从资源管理器复制路径粘贴。',
+              ),
+            ),
+            h(
+              'div',
+              { className: 'ws-field' },
+              h('label', null, '任务名称（可选）'),
+              h('input', {
+                className: 'ws-input',
+                value: form.name,
+                placeholder: '留空则用目录名',
+                onChange: (e) => setForm({ ...form, name: e.target.value }),
+              }),
+            ),
+          )
+        }
+        return h(
+          'div',
+          null,
+          h(
+            'div',
+            { className: 'ws-field' },
+            h('label', null, '同步方向'),
+            h(
+              'select',
+              {
+                className: 'ws-select',
+                value: form.mode,
+                onChange: (e) => setForm({ ...form, mode: e.target.value }),
+              },
+              h('option', { value: 'bidirectional' }, '双向同步'),
+              h('option', { value: 'upload_only' }, '仅上传（本机 → 对端）'),
+              h('option', { value: 'download_only' }, '仅下载（对端 → 本机）'),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'ws-field' },
+            h('label', null, '忽略扩展名（可选）'),
+            h('input', {
+              className: 'ws-input',
+              value: form.ext,
+              placeholder: 'lnk,tmp',
+              onChange: (e) => setForm({ ...form, ext: e.target.value }),
+            }),
+          ),
+          h(
+            'div',
+            { className: 'ws-card', style: { background: '#121315' } },
+            h('div', { className: 'ws-sub', style: { marginBottom: 6 } }, '即将创建'),
+            h(
+              'div',
+              null,
+              `${form.root || '（未填目录）'} ⇄ ${shortServer(form.server)} · 房间 ${form.workspace}`,
+            ),
+            issues.length > 0
+              ? h(
+                  'div',
+                  { className: 'ws-issues' },
+                  issues.map((item) => h('div', { key: item }, `· ${item}`)),
+                )
+              : h(
+                  'div',
+                  { style: { color: '#4CC38A', fontSize: 12, marginTop: 6 } },
+                  '· 配置检查通过',
+                ),
+          ),
+        )
+      }
+
+      return h(
+        'div',
+        { className: 'ws-overlay' },
+        h(
+          'div',
+          { className: 'ws-modal' },
+          h('div', { className: 'ws-modal-head' }, '创建同步任务'),
+          h('div', { className: 'ws-modal-body' }, stepBar, body()),
+          h(
+            'div',
+            { className: 'ws-modal-foot' },
+            h('button', { className: 'ws-btn ws-btn-ghost', onClick: onClose }, '取消'),
+            step > 0
+              ? h('button', { className: 'ws-btn', onClick: () => setStep(step - 1) }, '上一步')
+              : null,
+            step < 2
+              ? h(
+                  'button',
+                  {
+                    className: 'ws-btn ws-btn-primary',
+                    disabled: issues.length > 0,
+                    title: issues.join('；'),
+                    onClick: () => setStep(step + 1),
+                  },
+                  '下一步',
+                )
+              : h(
+                  'button',
+                  {
+                    className: 'ws-btn ws-btn-primary',
+                    disabled: busy || issues.length > 0,
+                    onClick: () => void create(),
+                  },
+                  busy ? '创建中…' : '创建',
+                ),
+          ),
+        ),
+      )
+    }
+
+    /* ------------------------------------------------------------ 原始日志浮层 */
+
+    function RawLog({ task, lines, onClose }) {
+      const box = React.useRef(null)
+      React.useEffect(() => {
+        if (box.current) box.current.scrollTop = box.current.scrollHeight
+      }, [lines])
+      return h(
+        'div',
+        { className: 'ws-raw' },
+        h(
+          'div',
+          { className: 'ws-raw-head' },
+          h('span', null, `同步日志 · ${task?.display_name ?? ''}（最近 ${LOG_RING} 行）`),
+          h('button', { className: 'ws-btn ws-btn-ghost', onClick: onClose }, '关闭'),
+        ),
+        h(
+          'div',
+          { ref: box, className: 'ws-raw-body' },
+          lines.length === 0 ? '（暂无输出）' : lines.join('\n'),
+        ),
+      )
+    }
+
+    /* ------------------------------------------------------------ App */
+
+    function WinsyncApp() {
+      ensureStyles()
+      const store = useStore()
+      const [tab, setTab] = React.useState('tasks')
+      const [editing, setEditing] = React.useState(null)
+      const [wizard, setWizard] = React.useState(false)
+
+      const data = store.data
+      const rawLogTask = store.rawTask ? data?.tasks.find((t) => t.id === store.rawTask) ?? null : null
+
+      const nav = (id, label) =>
+        h(
+          'button',
+          {
+            className: 'ws-nav-item',
+            'data-active': tab === id ? 'true' : 'false',
+            onClick: () => setTab(id),
+          },
+          label,
+        )
+
+      return h(
+        'div',
+        { className: 'ws-root' },
+        h(
+          'aside',
+          { className: 'ws-side' },
+          h(
+            'div',
+            { className: 'ws-brand' },
+            h('div', { className: 'ws-mark' }, 'W'),
+            h('div', { className: 'ws-brand-name' }, 'WinSync'),
+          ),
+          h('nav', { className: 'ws-nav' }, nav('tasks', '同步任务'), nav('logs', '同步日志'), nav('settings', '设置')),
+          h(
+            'div',
+            { className: 'ws-side-foot' },
+            h('button', { className: 'ws-nav-item', onClick: () => setWizard(true) }, '+ 创建同步任务'),
+          ),
+        ),
+        h(
+          'main',
+          { className: 'ws-content', style: { position: 'relative' } },
+          store.connected
+            ? null
+            : h(
+                'div',
+                { className: 'ws-banner', style: { margin: '12px 24px 0' } },
+                h('span', null, '实时连接中断，正在重连…'),
+                h('button', { className: 'ws-link', onClick: () => void store.refresh() }, '手动刷新'),
+              ),
+          store.error
+            ? h(
+                'div',
+                {
+                  className: 'ws-banner',
+                  style: {
+                    margin: '12px 24px 0',
+                    background: '#2A1715',
+                    borderColor: '#5A2A26',
+                    color: '#FFB4AF',
+                  },
+                },
+                h('span', null, `同步服务不可用：${store.error.message}`),
+                h('button', { className: 'ws-link', onClick: () => void store.refresh() }, '重试'),
+              )
+            : null,
+          !data && !store.error
+            ? h('div', { className: 'ws-scroll' }, h('div', { className: 'ws-empty' }, '正在读取同步状态…'))
+            : tab === 'tasks'
+              ? h(TasksPage, { store, onCreate: () => setWizard(true), onEdit: setEditing })
+              : tab === 'logs'
+                ? h(LogsPage, { store })
+                : h(SettingsPage, { store }),
+          rawLogTask
+            ? h(RawLog, {
+                task: rawLogTask,
+                lines: rawLogTask.runtime?.logs ?? [],
+                onClose: store.closeRawLog,
+              })
+            : null,
+          store.toast
+            ? h('div', { className: 'ws-toast', 'data-tone': store.toast.tone }, store.toast.text)
+            : null,
+        ),
+        wizard ? h(Wizard, { onClose: () => setWizard(false), store }) : null,
+        editing ? h(TaskEditor, { task: editing, onClose: () => setEditing(null), store }) : null,
+      )
+    }
+
+    /* ------------------------------------------------------------ 注册 */
+
     function WinsyncIcon({ size }) {
       const edge = typeof size === 'number' && size > 0 ? size : 16
       return h(
@@ -135,91 +1435,16 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function WinsyncPage() {
-      const [phase, setPhase] = React.useState('idle')
-      const [message, setMessage] = React.useState('')
-      const [payload, setPayload] = React.useState(null)
-
-      const run = React.useCallback(async (label, route, method) => {
-        setPhase('busy')
-        setMessage(`${label}…`)
-        setPayload(null)
-        try {
-          const body = await api(route, method)
-          setPayload(body)
-          setPhase('ok')
-          setMessage(`${label} 成功`)
-        } catch (error) {
-          setPayload(error.body ?? null)
-          setPhase('bad')
-          setMessage(`${label} 失败：${error.message}`)
-        }
-      }, [])
-
-      React.useEffect(() => {
-        void run('探测插件路由', '/ping')
-      }, [run])
-
-      return h(
-        'div',
-        { style: styles.root },
-        h('h2', { style: styles.title }, 'WinSync'),
-        h('p', { style: styles.hint }, 'P0 骨架：只验证插件挂载、宿主路由与子进程握手，尚未接入同步功能。'),
-        h(
-          Card,
-          { title: '1 · 插件与宿主路由' },
-          h(
-            'div',
-            { style: styles.row },
-            h(
-              'span',
-              { style: styles.pill(phase === 'bad' ? 'bad' : phase === 'busy' ? 'busy' : 'ok') },
-              phase === 'bad' ? '失败' : phase === 'busy' ? '进行中' : '已连通',
-            ),
-            h('button', { style: styles.button, onClick: () => void run('探测插件路由', '/ping') }, '重新探测'),
-            h('span', { style: { opacity: 0.7 } }, 'GET /winsync/api/ping'),
-          ),
-          message ? h('pre', { style: styles.code }, message) : null,
-        ),
-        h(
-          Card,
-          { title: '2 · 子进程握手（探针）' },
-          h(
-            'div',
-            { style: styles.row },
-            h('button', { style: styles.button, onClick: () => void run('启动探针', '/probe/start', 'POST') }, '启动'),
-            h('button', { style: styles.button, onClick: () => void run('查询状态', '/probe/status') }, '状态'),
-            h('button', { style: styles.button, onClick: () => void run('停止探针', '/probe/stop', 'POST') }, '停止'),
-          ),
-          message ? h('pre', { style: styles.code }, message) : null,
-        ),
-        payload ? h('pre', { style: styles.code }, JSON.stringify(payload, null, 2)) : null,
-      )
-    }
-
     return {
       name: 'dsh-winsync',
       inject: ['slots'],
       apply(ctx) {
-        // Centre column page. The sidebar entry below selects it by the same id.
         ctx.slots.inject('main', () =>
-          ctx.slots.register(
-            {
-              name: 'main',
-              key: PANEL_ID,
-            },
-            WinsyncPage,
-          ),
+          ctx.slots.register({ name: 'main', key: PANEL_ID }, WinsyncApp),
         )
-        // Left sidebar icon list: one row per global panel, addressed by id.
         ctx.slots.inject('sidebar.panellist', () =>
           ctx.slots.register(
-            {
-              name: 'sidebar.panellist',
-              id: PANEL_ID,
-              order: 10,
-              label: () => '同步',
-            },
+            { name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => '同步' },
             WinsyncIcon,
           ),
         )

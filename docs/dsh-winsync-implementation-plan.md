@@ -408,37 +408,50 @@ useSyncStore():
 
 ## 5. 构建与安装
 
+没有构建步骤：宿主半是纯 ESM（`lib/index.js` 直接 import），客户端半是手写 bundle（`lib/client.js`），
+`dsh` 直接从 `lib/*.js` 加载。这比原计划的 `tsc + esbuild` 少一条链，代价是客户端不能用 JSX
+（用 `React.createElement` 的 `h()` 别名写）。
+
 ```bash
-# Rust
+# 1. Rust 守护进程
 cd sync
-cargo build --release -p sync-daemon        # → target/release/winsync-daemon.exe
-cargo test --workspace
+cargo build --release -p sync-daemon      # → target/release/sync-daemon.exe
+cargo test -p sync-daemon                 # 16 项单元测试
 
-# 插件
-cd ../dsh-winsync
-npm install
-npm run build                                # 宿主 tsc + 客户端 esbuild 包装
+# 2. 把守护进程放到插件自己的目录（与 exe 的 Programs\WinSync 分开）
+mkdir -p "%LOCALAPPDATA%\dsh-winsync\bin"
+copy target\release\sync-daemon.exe "%LOCALAPPDATA%\dsh-winsync\bin\winsync-daemon.exe"
 
-# 安装到 desktop profile（本地目录）
+# 3. 装进 profile
 dsh plugin --profile desktop add file:C:\Users\gjn86\WorkBuddy\spaces\2026_11_19_20-38-45\dsh-winsync
-# 或：npm pack → dsh plugin --profile desktop add ./dsh-winsync-0.1.0.tgz
 ```
 
-客户端打包（`scripts/build-client.mjs`）关键点：
+**改过插件文件后必须重装一次**：`nodeLinker: hoisted` 把包**硬链**进 `profiles/<name>/node_modules`，
+新增文件不会自动出现（P3 期间就踩过：profile 里只有 3 个旧文件，缺 `daemon.js`，插件直接加载失败）。
+重装的做法是先删后装：
+
+```bash
+rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-winsync
+dsh plugin --profile desktop install --force
+```
+
+守护进程的查找顺序（`lib/daemon.js#resolveBinary`）：
+偏好 `binPath` → `WINSYNC_DAEMON_BIN` → `<状态目录>/bin/winsync-daemon.exe`
+→ `%LOCALAPPDATA%\Programs\WinSync\winsync-daemon.exe` → `PATH` → 仓库产物（开发用）。
+
+客户端 bundle 的包装方式（`lib/client.js` 末尾）：
 
 ```js
-// esbuild: bundle src/client/index.tsx → CJS，外部化 react 与官方包
-// 再包一层 ModuleLoader，id 必须与包名一致
-const wrapped = `window.__ModuleLoader__.load({id:"dsh-winsync",factory:function(require){
-  var module={exports:{}},exports=module.exports;
-  ${cjs}
-  return module.exports;
-}});`
+window.__ModuleLoader__.load({ id: 'dsh-winsync', factory: function (require) {
+  // …整个组件树…
+  return { name: 'dsh-winsync', inject: ['slots'], apply(ctx) { /* main + sidebar.panellist */ } }
+}})
 ```
 
-CSS 作为字符串内联（`loader: { '.css': 'text' }`），避免额外资源文件与路由。
+CSS 作为字符串内联（`const CSS = \`…\`` + `ensureStyles()` 注入 `<style data-winsync>`），
+不产生额外资源文件与路由。
 
-安装后重启 dsh，主区应出现「同步」标签；控制台不得出现 `duplicate prefix route` 或 slot 重复注册。
+安装后重启 dsh，左侧栏应出现「同步」图标；控制台不得出现 `duplicate prefix route` 或 slot 重复注册。
 
 ## 6. 里程碑与任务分解
 
@@ -514,21 +527,71 @@ CSS 作为字符串内联（`loader: { '.css': 'text' }`），避免额外资源
 
 验收：
 
-- `node test/p2-smoke.mjs`（10 项）：注册 1 条 prefix 路由 + 4 个工具；`/ping` 不泄露 token；`/diag` 真拉起 daemon；
-  经代理建任务、409 `root-changed` 原样透传、404 透传；SSE 首帧 `hello`；3 个只读工具返回契约正确；
-  卸载后 daemon 停止且 `daemon.json` 被清掉。
+- `node test/p2-smoke.mjs`（11 项）：注册 1 条 prefix 路由 + 4 个工具；`/ping` 不泄露 token；`/diag` 真拉起 daemon
+  且只回 token 指纹；经代理建任务、409 `root-changed` 原样透传、404 透传；SSE 首帧 `hello`；
+  3 个只读工具返回契约正确；卸载后 daemon 停止且 `daemon.json` 被清掉。
 - `node test/client-smoke.mjs`：客户端注册契约（main 面板 + sidebar 行）仍通过。
+
+P3 期间对宿主半的两处增补：
+
+- **`/diag` 不再吐 token 明文**：握手文件里的 token 是 daemon 的唯一凭证，`/diag` 只返回
+  `{present, length, fingerprint}`（`lib/proxy.js#redactHandshake`）。这条路由不走 dsh 的会话闸门
+  （插件 prefix 路由是裸的），所以不能在响应里放凭证。
+- **删掉 P0 的 `/probe/*` 过渡别名**：正式界面只用 `/winsync/api/*`，留着就是多余的本机写入口。
 
 ### P3 界面复刻
 | # | 任务 | 完成标志 |
 |---|---|---|
-| 3.1 | 设计令牌 + 侧栏 + 页面骨架 | 三页可切换，180px 侧栏，色值与表一致 |
-| 3.2 | 任务卡 + 进度 + 状态 + ⋯菜单 + 暂停 | 三档宽度（≥1000 / 800 / 640）不塌 |
-| 3.3 | 创建向导三步 | 校验、沿用连接、返回/取消行为与 exe 一致 |
-| 3.4 | 任务设置弹窗 | 保存/暂停/删除全通，密钥不回显 |
-| 3.5 | 日志页表格 | 筛选/搜索/斑马纹/导出/清空 |
-| 3.6 | 设置页 + 运行日志浮层 | 与 exe 条目一一对应（含禁用态说明） |
-| 3.7 | 空态/错误态/断线态 | 每页各有明确引导文案，无白屏 |
+| 3.1 ✅ | 设计令牌 + 侧栏 + 页面骨架 | 三页可切换，180px 侧栏，色值与表一致 |
+| 3.2 ✅ | 任务卡 + 进度 + 状态 + ⋯菜单 + 暂停 | 三档宽度（≥1000 / 800 / 640）不塌 |
+| 3.3 ✅ | 创建向导三步 | 校验、沿用连接、返回/取消行为与 exe 一致 |
+| 3.4 ✅ | 任务设置弹窗 | 保存/暂停/删除全通，密钥不回显 |
+| 3.5 ✅ | 日志页表格 | 筛选/搜索/斑马纹/导出/清空 |
+| 3.6 ✅ | 设置页 + 运行日志浮层 | 与 exe 条目一一对应（含禁用态说明） |
+| 3.7 ✅ | 空态/错误态/断线态 | 每页各有明确引导文案，无白屏 |
+
+### P3 完成记录（2026-11-21）
+
+`lib/client.js` 约 1,100 行手写 bundle（v0.3.0），结构：
+
+| 部分 | 内容 |
+|---|---|
+| `CSS` + `ensureStyles()` | `ws-` 前缀全量样式，色值照 `ui_colors`；只注入一次（`<style data-winsync>`） |
+| `useStore()` | `/state` 拉快照 + `EventSource('/winsync/api/events')`；处理 `hello/state/log/progress/done/lagged`；断线指数退避 400ms→8s；统一 `run(work, successText)` 做 toast + 刷新 |
+| `WinsyncApp` | 180px 侧栏（品牌 + 三页导航 + 底部「+ 创建同步任务」）+ 主区；断线横幅、同步服务不可用横幅、toast、两个弹窗、原始日志浮层都在这一层 |
+| `TasksPage` / `TaskCard` | 进度条、三列信息（路径 / 房间 / 规则）、「立即同步」禁用条件、`⋯` 菜单（设置/打开目录/查看日志/删除）、暂停圆钮 |
+| `LogsPage` | 任务筛选 + 状态筛选 + 搜索 + 表格 + 导出 CSV（`window.open` 直落 daemon 的 `/export.csv`）+ 清空 |
+| `SettingsPage` | 自启开关、上下行限速、记录保留（天数/条数）、立即清理、诊断、保存 |
+| `Wizard` | 三步（服务器 → 本机目录 → 确认）；`issues` 实时预检，有问题时「下一步/创建」禁用并把原因挂在 `title` 上 |
+| `TaskEditor` | 改目录要二次确认，确认后带 `force: true`（daemon 那边就是 409 `root-changed`） |
+| `RawLog` | 浮层贴底滚动，读 `runtime.logs` 环形缓冲 |
+
+浏览器的目录选择器拿不到系统路径（`<input type="file" webkitdirectory>` 只给相对路径），
+所以第二步是**粘贴绝对路径**，并在 hint 里写明原因——这点与 exe 不同，已记进 README。
+
+响应式用**容器查询**而不是媒体查询：面板宽度由 dsh 的分栏决定，跟视口没关系。
+
+| 面板宽度 | 表现 |
+|---|---|
+| > 820px | 三列信息 |
+| ≤ 820px | 两列 |
+| ≤ 640px | 单列，侧栏收窄到 132px，品牌名只留图标 |
+
+验收（`node test/cdp-p3.mjs "<url>" <port>`，CDP 真实鼠标事件驱动，无 npm 依赖）：
+
+- 空态 → 向导 1/3 → 2/3 → 3/3 → 任务卡 → 日志页 → 设置页 → 600px 窄态，逐张截图在 `test/shots/`；
+- 全程 `console` 零报错；
+- 容器查询实测：900px → 3 列（`196.3px × 3`）、780px → 2 列（`240.5px × 2`）、600px → 1 列（`389px`）且
+  `.ws-brand-name` 隐藏；
+- 建出的任务在无中继时会走真实失败路径，界面显示
+  `连接服务器失败: IO error: 由于目标计算机积极拒绝，无法连接。 (os error 10061)`
+  （daemon 侧新加 `util::describe_error` 去掉 anyhow 链里重复的段，此前同一句会打印两遍）。
+
+同时验证的隔离行为：
+
+- 插件在独立状态目录下自建 `<state>/bin/winsync-daemon.exe` 并成功拉起，未碰 exe 的 `%APPDATA%\WinSync`；
+- 宿主被硬杀后 `daemon.json` 残留 → 下次 `ensure()` 按 pid 判活回收，日志实证
+  `[ensure] 丢弃陈旧握手（pid=45412 已退出）`。
 
 ### P4 联调与交付
 | # | 任务 | 完成标志 |

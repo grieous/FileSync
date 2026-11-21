@@ -108,6 +108,14 @@ assert.equal(diag.status, 200)
 assert.equal(diag.body.health?.status, 200, `daemon 没起来：${JSON.stringify(diag.body)}`)
 console.log(`PASS /diag 拉起 daemon pid=${diag.body.health.pid} port=${diag.body.health.port}`)
 
+// 握手文件里的 token 是 daemon 的唯一凭证，/diag 只给指纹
+const rawHandshake = JSON.parse(fs.readFileSync(path.join(stateDir, 'daemon.json'), 'utf8'))
+const diagText = JSON.stringify(diag.body)
+assert.ok(!diagText.includes(rawHandshake.token), '/diag 泄露了 daemon token')
+assert.equal(diag.body.handshake.token.present, true)
+assert.equal(diag.body.handshake.token.length, rawHandshake.token.length)
+console.log('PASS /diag 只给 token 指纹，不给明文')
+
 /* ------------------------------------------------------------ 代理透传 CRUD */
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-p2-root-'))

@@ -41,6 +41,26 @@ function forwardHeaders(req) {
 }
 
 /**
+ * 握手文件里最要命的是 token：它是 daemon 的唯一凭证。
+ * /diag 只证明「握手存在、pid 对不对」，所以只给指纹与长度。
+ */
+function redactHandshake(handshake) {
+  if (!handshake) return null
+  const token = typeof handshake.token === 'string' ? handshake.token : ''
+  return {
+    pid: handshake.pid ?? null,
+    port: handshake.port ?? null,
+    version: handshake.version ?? null,
+    started_at: handshake.started_at ?? null,
+    token: {
+      present: token.length > 0,
+      length: token.length,
+      fingerprint: token.length >= 8 ? `${token.slice(0, 4)}…${token.slice(-4)}` : '…',
+    },
+  }
+}
+
+/**
  * 建一个 prefix handler。
  * @param {import('./daemon.js').DaemonManager} manager
  */
@@ -75,32 +95,13 @@ export function createApiHandler(manager) {
         plugin: 'dsh-winsync',
         runtimeDir: manager.dir,
         prefsPath: manager.snapshot().prefsPath,
-        handshake: manager.peekHandshake(),
+        handshake: redactHandshake(manager.peekHandshake()),
         daemon: manager.snapshot(),
         health,
       })
       return
     }
 
-    // 过渡别名：P0 面板用的探针接口，P3 换成正式界面后可删
-    if (route === '/probe/start' && req.method === 'POST') {
-      try {
-        const info = await manager.ensure()
-        writeJson(res, 200, { ok: true, pid: info.pid, port: info.port, daemon: manager.snapshot() })
-      } catch (error) {
-        writeJson(res, 502, failure(error?.code ?? 'daemon-unavailable', error?.message ?? String(error)))
-      }
-      return
-    }
-    if (route === '/probe/status') {
-      writeJson(res, 200, { ok: true, daemon: manager.snapshot() })
-      return
-    }
-    if (route === '/probe/stop' && req.method === 'POST') {
-      await manager.stopIfOwned()
-      writeJson(res, 200, { ok: true, daemon: manager.snapshot() })
-      return
-    }
 
     if (!ALLOWED_METHODS.has(req.method ?? 'GET')) {
       writeJson(res, 405, failure('bad-request', `不支持的方法 ${req.method}`))

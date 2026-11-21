@@ -1,10 +1,10 @@
 # dsh-winsync
 
 把 WinSync 做成 DeepSeek Harness 的插件：左侧栏一个「同步」入口，主区面板复刻 exe 的界面；
-同步本身由 `sync-daemon.exe`（Rust，复用 `session::run`）执行，插件只做代理与界面。
+同步本身由 `winsync-daemon.exe`（Rust，复用 `session::run`）执行，插件只做代理与界面。
 
 ```
-浏览器 ──同源 /winsync/api──▶ 插件宿主(Node) ──注入 Bearer──▶ sync-daemon ──▶ relay / 对端
+浏览器 ──同源 /winsync/api──▶ 插件宿主(Node) ──注入 Bearer──▶ winsync-daemon ──▶ relay / 对端
                                                         └─ %LOCALAPPDATA%\dsh-winsync
 ```
 
@@ -19,10 +19,23 @@ daemon 启动任务前只读地看一眼 exe 的配置，命中就拒绝，返�
 ## 安装
 
 ```bash
+# 1. 守护进程（release 更划算：同步循环是 CPU/IO 密型）
+cd ../sync && cargo build --release -p sync-daemon
+mkdir -p "%LOCALAPPDATA%\dsh-winsync\bin"
+copy target\release\sync-daemon.exe "%LOCALAPPDATA%\dsh-winsync\bin\winsync-daemon.exe"
+
+# 2. 插件
 dsh plugin --profile desktop add file:C:\path\to\dsh-winsync
 ```
 
-改完代码不用重装（profile 里是链接），重启 dsh 生效。
+**改完插件代码要重装一次**：profile 用 `nodeLinker: hoisted`，包是**硬链**进去的，新增文件不会自动出现。
+
+```bash
+rm -rf ~/.dsh/profiles/desktop/node_modules/dsh-winsync
+dsh plugin --profile desktop install --force
+```
+
+然后重启 dsh，左侧栏出现「同步」。
 
 ## daemon 从哪来
 
@@ -30,11 +43,30 @@ dsh plugin --profile desktop add file:C:\path\to\dsh-winsync
 
 1. `<state>\plugin.json` 的 `binPath`
 2. 环境变量 `WINSYNC_DAEMON_BIN`
-3. `%LOCALAPPDATA%\Programs\WinSync\winsync-daemon.exe`
-4. `PATH` 里的 `winsync-daemon.exe`
-5. 仓库开发产物 `sync/target/debug|release/sync-daemon.exe`
+3. `<state>\bin\winsync-daemon.exe`（推荐，插件自有目录）
+4. `%LOCALAPPDATA%\Programs\WinSync\winsync-daemon.exe`
+5. `PATH` 里的 `winsync-daemon.exe`
+6. 仓库开发产物 `sync/target/debug|release/sync-daemon.exe`
 
-都没有时接口返回 `daemon-missing`，界面会给出提示。构建：`cargo build -p sync-daemon`。
+都没有时接口返回 `daemon-missing`，界面会给出提示。
+
+## 界面
+
+三页 + 两个弹窗 + 一个浮层，全部在 `lib/client.js` 里手写（无构建步骤、无 JSX）：
+
+| 页面 | 内容 |
+|---|---|
+| 同步任务 | 任务卡：进度条、路径/房间/规则三列、「立即同步」、暂停圆钮、`⋯`（设置/打开目录/查看日志/删除） |
+| 同步日志 | 任务与状态筛选、搜索、表格、导出 CSV、清空 |
+| 设置 | 开机自启、上下行限速、记录保留（天数/条数）、立即清理、诊断、保存 |
+| 弹窗 | 创建向导（三步 + 预检）、任务设置（改目录要二次确认） |
+| 浮层 | 原始日志（最近 400 行，贴底滚动） |
+
+响应式用容器查询，因为面板宽度取决于 dsh 的分栏而不是视口：> 820px 三列，≤ 820px 两列，
+≤ 640px 单列且侧栏收窄到 132px。
+
+**与 exe 的差异**：浏览器拿不到系统的目录选择框（`<input type="file" webkitdirectory>` 只给相对路径），
+所以创建向导第二步是**粘贴绝对路径**，hint 里写明了原因。
 
 ## 偏好
 
@@ -46,6 +78,7 @@ dsh plugin --profile desktop add file:C:\path\to\dsh-winsync
 
 - `stopDaemonOnExit`：默认退出即停。想 7×24 常驻就设 false，并同时打开 daemon 的开机自启。
 - 复用的 daemon（不是本插件拉起的）永远不会被停。
+- 宿主被硬杀时 `daemon.json` 会残留，下次启动按 pid 判活回收，不会卡住。
 
 ## 接口
 
@@ -54,11 +87,14 @@ dsh plugin --profile desktop add file:C:\path\to\dsh-winsync
 | 路径 | 说明 |
 |---|---|
 | `GET /ping` | 插件自检：状态目录、daemon 快照；不含 token |
-| `GET /diag` | 拉起 daemon 并回 `health`，排查「界面连不上」用 |
+| `GET /diag` | 拉起 daemon 并回 `health`；握手里的 token 只给指纹与长度 |
 | `* /tasks` `* /state` `* /events` … | 原样代理到 daemon，Bearer 在服务端注入 |
 
 方法白名单 `GET/POST/PATCH/DELETE`，请求体上限 256 KB，上游 5xx 统一翻成
 `502 {code:'daemon-unavailable'}`。
+
+> 插件 prefix 路由不走 dsh 的会话闸门，所以这两条自检接口刻意不回任何凭证——
+> 只监听 `127.0.0.1`，且响应里没有可读的密钥。
 
 ## agent 工具
 
@@ -73,6 +109,12 @@ dsh plugin --profile desktop add file:C:\path\to\dsh-winsync
 
 ```bash
 node test/client-smoke.mjs   # 客户端注册契约（main 面板 + 左栏行）
-node test/p2-smoke.mjs       # 宿主：路由、代理、CRUD 透传、SSE、工具、卸载清理
+node test/p2-smoke.mjs       # 宿主：路由、代理、CRUD 透传、SSE、工具、卸载清理、/diag 脱敏
 node test/cdp-inspect.mjs <url> [port] [--aria=同步]   # 真实页面里的渲染与截图
+
+# 分步视觉走查（需要先起一个实例）：空态→向导三步→任务卡→日志→设置→窄态
+CDP_SIZE=1440,960 node test/cdp-p3.mjs "<url>" [port]   # 截图落在 test/shots/
 ```
+
+CDP 脚本一律用真实鼠标事件（`Input.dispatchMouseEvent`）而不是 DOM 的 `.click()`：
+面板里「+ 创建同步任务」这类文字在父 `div` 上也有，`.click()` 会点到没有 onClick 的那一层。
