@@ -1,22 +1,28 @@
 //! 命令行入口。
 //!
 //! 图形界面是主入口（winsync-gui），这个 CLI 用于排查问题和跑自动化：
-//!   sync scan   只看本地索引与状态，不联网
-//!   sync sync   执行一次真实同步
-//!   sync where  打印配置与状态库位置
+//!   sync tasks   列出已配置的同步任务
+//!   sync scan    只看本地索引与状态，不联网
+//!   sync sync    执行一次真实同步
+//!   sync where   打印配置与状态库位置
 //!
-//! 配置与 GUI 共用 `%APPDATA%\WinSync\config.json`，命令行参数可以临时覆盖。
+//! 配置与 GUI 共用 `%APPDATA%\WinSync\config.json`；
+//! `--task` 选择任务，`--server/--token/--root` 可临时覆盖（不写回配置）。
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use sync_client::{run, Config};
+use sync_client::{run, Config, Settings};
 use sync_core::{root_hash, scan_cached, Store};
 
 #[derive(Parser, Debug)]
 #[command(name = "sync", version, about = "两台 Windows 经 Linux 中继双向同步")]
 struct Args {
+    /// 任务 id 或任务名（默认第一个任务）
+    #[arg(long, env = "SYNC_TASK")]
+    task: Option<String>,
+
     #[arg(long, env = "SYNC_SERVER")]
     server: Option<String>,
 
@@ -43,6 +49,8 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// 列出已配置的任务
+    Tasks,
     /// 只扫描本地目录，不上网
     Scan,
     /// 执行一次同步
@@ -58,8 +66,48 @@ async fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Where => {
+            let settings = Settings::load()?.unwrap_or_default();
             println!("配置文件 : {}", Config::file().display());
-            println!("状态库   : {}", Config::state_db().display());
+            println!("状态目录 : {}", Config::dir().join("tasks").display());
+            if settings.tasks.is_empty() {
+                println!("任务     : （无，请先在界面里新建）");
+            }
+            for t in &settings.tasks {
+                println!(
+                    "任务 {:<10} {:<12} {} ⇄ {}",
+                    t.id,
+                    t.display_name(),
+                    t.root,
+                    t.workspace
+                );
+                println!("           状态库: {}", t.state_db().display());
+            }
+            Ok(())
+        }
+        Cmd::Tasks => {
+            let settings = Settings::load()?.unwrap_or_default();
+            if settings.tasks.is_empty() {
+                println!("还没有任务。请在图形界面里点「新建任务」。");
+                return Ok(());
+            }
+            println!(
+                "{:<10} {:<14} {:<8} {:<8} {}",
+                "ID", "名称", "模式", "状态", "目录"
+            );
+            for t in &settings.tasks {
+                println!(
+                    "{:<10} {:<14} {:<8} {:<8} {}",
+                    t.id,
+                    t.display_name(),
+                    match t.mode {
+                        sync_client::SyncMode::Bidirectional => "双向",
+                        sync_client::SyncMode::UploadOnly => "仅上传",
+                        sync_client::SyncMode::DownloadOnly => "仅下载",
+                    },
+                    if t.paused { "已暂停" } else { "运行中" },
+                    t.root
+                );
+            }
             Ok(())
         }
         Cmd::Scan => cmd_scan(&args),
@@ -67,38 +115,53 @@ async fn main() -> Result<()> {
     }
 }
 
+/// 选出一个任务并套用命令行覆盖。不写回配置文件——界面里的任务不该被 CLI 改掉。
 fn resolve(args: &Args) -> Result<Config> {
-    let mut cfg = Config::load()?.unwrap_or_default();
+    let settings = Settings::load()?.unwrap_or_default();
+
+    let mut task = if let Some(sel) = &args.task {
+        match settings.find(sel) {
+            Some(i) => settings.tasks[i].clone(),
+            None => bail!("找不到任务 {sel}。用 `sync tasks` 查看已配置的任务。"),
+        }
+    } else if let Some(t) = settings.tasks.first() {
+        t.clone()
+    } else {
+        Config::default()
+    };
+
+    // 命令行覆盖（自动化测试、临时排查都靠它）
     if let Some(v) = &args.server {
-        cfg.server = v.clone();
+        task.server = v.clone();
     }
     if let Some(v) = &args.token {
-        cfg.token = v.clone();
+        task.token = v.clone();
     }
     if let Some(v) = &args.workspace {
-        cfg.workspace = v.clone();
+        task.workspace = v.clone();
     }
     if let Some(v) = &args.root {
-        cfg.root = v.to_string_lossy().to_string();
+        task.root = v.to_string_lossy().to_string();
+    }
+    if args.server.is_some() || args.root.is_some() {
+        task.id = "adhoc".to_string();
+        task.name = "临时任务".to_string();
     }
 
-    if cfg.server.is_empty() || cfg.token.is_empty() || cfg.root.is_empty() {
+    let issues = task.issues();
+    if !issues.is_empty() {
         bail!(
-            "配置不完整。请先启动图形界面填写，或提供参数：\n\
-             --server ws://host:port/ws --token <密钥> --root \"D:\\Sync\""
+            "任务配置不完整：{}\n可在图形界面里新建/编辑任务，或用参数覆盖：\n\
+             --server ws://host:port/ws --token <密钥> --root \"D:\\Sync\"",
+            issues.join("；")
         );
     }
-    if !Path::new(&cfg.root).is_dir() {
-        bail!("同步目录不存在: {}", cfg.root);
-    }
-
-    cfg.save()?;
-    Ok(cfg)
+    Ok(task)
 }
 
 fn cmd_scan(args: &Args) -> Result<()> {
     let cfg = resolve(args)?;
-    let store = Store::open(&Config::state_db())?;
+    let store = Store::open(&cfg.state_db())?;
     let cache = store.load_hash_cache()?;
     let (entries, stats, fresh) = scan_cached(Path::new(&cfg.root), &cfg.filter, &cache)?;
     store.replace_hash_cache(&fresh)?;
@@ -106,11 +169,14 @@ fn cmd_scan(args: &Args) -> Result<()> {
     let files = entries.iter().filter(|e| !e.is_dir()).count();
     let bytes: u64 = entries.iter().map(|e| e.size).sum();
 
+    println!("任务     : {} ({})", cfg.display_name(), cfg.id);
     println!("同步目录 : {}", cfg.root);
     println!("服务器   : {}", cfg.server);
     println!("房间     : {}", cfg.workspace);
     println!("模式     : {:?}", cfg.mode);
+    println!("状态     : {}", if cfg.paused { "已暂停" } else { "运行中" });
     println!("过滤规则 : {}", cfg.filter.signature());
+    println!("状态库   : {}", cfg.state_db().display());
     println!("device_id: {}", store.device_id()?);
     println!("base 条目: {}", store.base_count()?);
     println!("目录     : {}", entries.len() - files);

@@ -573,7 +573,7 @@ pub async fn run(
     allow_root_change: bool,
     wait_peer_secs: u64,
 ) -> Result<Report> {
-    let db = Config::state_db();
+    let db = cfg.state_db();
     let root_str = cfg.root.replace('\\', "/");
     let filter_sig = cfg.filter.signature();
 

@@ -3,5 +3,5 @@
 pub mod config;
 pub mod session;
 
-pub use config::{Config, SyncMode};
+pub use config::{new_id, Config, Settings, SyncMode};
 pub use session::{run, Event, Report};

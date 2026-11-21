@@ -1,6 +1,10 @@
-//! 配置：服务器地址、token、房间名、同步目录。
+//! 配置：一个「同步任务」= 一条本机目录 ⇄ 服务器房间的绑定。
 //!
-//! 存放在 `%APPDATA%\WinSync\config.json`，GUI 和 CLI 共用同一份。
+//! 参考飞牛同步的组织方式：任务可以有多个、每个有名字和状态、可以单独暂停，
+//! 日志按任务归档。这里把每个任务存成一条记录，状态库也按任务分文件。
+//!
+//! 配置文件：`%APPDATA%\WinSync\config.json`
+//! 状态库：`%APPDATA%\WinSync\tasks\<task-id>.db`（base / hash_cache / activity 都在里面）
 
 use std::path::PathBuf;
 
@@ -44,8 +48,15 @@ impl SyncMode {
     }
 }
 
+/// 一个同步任务。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
+    /// 任务 id，同时是状态库文件名。旧配置迁移时自动生成。
+    #[serde(default)]
+    pub id: String,
+    /// 任务名，界面上显示的标题
+    #[serde(default)]
+    pub name: String,
     /// WebSocket 地址，例如 ws://1.2.3.4:8443/ws
     pub server: String,
     /// 与服务端一致的共享密钥
@@ -54,25 +65,36 @@ pub struct Config {
     pub workspace: String,
     /// 同步目录（绝对路径）
     pub root: String,
-    /// 同步方向。旧配置文件里没有这一项，缺省为双向。
+    /// 同步方向
     #[serde(default)]
     pub mode: SyncMode,
     /// 过滤规则。两端必须一致，否则会互相误判删除。
     #[serde(default)]
     pub filter: Filter,
+    /// 暂停：不再参与自动同步（手动「立即同步」仍然可用）
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            id: new_id(),
+            name: String::new(),
             server: "ws://127.0.0.1:8443/ws".to_string(),
             token: String::new(),
             workspace: "default".to_string(),
             root: String::new(),
             mode: SyncMode::default(),
             filter: Filter::default(),
+            paused: false,
         }
     }
+}
+
+/// 短 id：8 位十六进制，够用且好认（也用作文件名）。
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
 }
 
 impl Config {
@@ -90,13 +112,40 @@ impl Config {
         Self::dir().join("config.json")
     }
 
-    /// 状态库路径。`WINSYNC_DB` 可覆盖，用于本机同时跑两个实例做测试，
-    /// 或者做成绿色版（把状态放在程序目录下）。
-    pub fn state_db() -> PathBuf {
+    /// 每个任务一个状态库，彼此隔离：base、哈希缓存、设备身份、记录都互不干扰。
+    pub fn state_db(&self) -> PathBuf {
         if let Some(p) = std::env::var_os("WINSYNC_DB") {
             return PathBuf::from(p);
         }
+        let dir = Self::dir().join("tasks");
+        let _ = std::fs::create_dir_all(&dir);
+        let id = if self.id.is_empty() {
+            "default".to_string()
+        } else {
+            self.id.clone()
+        };
+        dir.join(format!("{id}.db"))
+    }
+
+    /// 旧版本单任务用的状态库位置
+    pub fn legacy_state_db() -> PathBuf {
         Self::dir().join("state.db")
+    }
+
+    pub fn display_name(&self) -> String {
+        if self.name.trim().is_empty() {
+            let tail = std::path::Path::new(&self.root)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| self.root.clone());
+            if tail.is_empty() {
+                "未命名任务".to_string()
+            } else {
+                tail
+            }
+        } else {
+            self.name.clone()
+        }
     }
 
     pub fn is_ready(&self) -> bool {
@@ -106,30 +155,40 @@ impl Config {
             && std::path::Path::new(&self.root).is_dir()
     }
 
-    pub fn load() -> Result<Option<Self>> {
-        let path = Self::file();
-        if !path.exists() {
-            return Ok(None);
+    /// 逐项检查，返回人能看懂的问题列表。
+    pub fn issues(&self) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+
+        let server = self.server.trim();
+        if server.is_empty() {
+            v.push("未填写服务器地址".into());
+        } else if !server.starts_with("ws://") && !server.starts_with("wss://") {
+            v.push("服务器地址必须以 ws:// 或 wss:// 开头".into());
+        } else if !server.contains("/ws") {
+            v.push("服务器地址通常以 /ws 结尾，例如 ws://192.168.3.222:18443/ws".into());
         }
-        let bytes =
-            std::fs::read(&path).with_context(|| format!("读取配置 {}", path.display()))?;
 
-        // Windows PowerShell 的 `Set-Content -Encoding utf8` 会写入 UTF-8 BOM，
-        // 而 serde_json 不接受 BOM，会把整份配置判为非法，导致程序静默退回默认值。
-        // 这里主动剥掉 BOM，避免用户被这个看不见的字符坑到。
-        let text = String::from_utf8_lossy(&bytes);
-        let text = text.trim_start_matches('\u{feff}');
+        if self.token.trim().is_empty() {
+            v.push("未填写密钥（要与服务器的 SYNC_TOKEN 完全一致）".into());
+        }
+        if self.workspace.trim().is_empty() {
+            v.push("未填写房间名（两台设备必须相同）".into());
+        }
 
-        Ok(Some(
-            serde_json::from_str(text).with_context(|| format!("解析配置 {}", path.display()))?,
-        ))
-    }
+        let root = self.root.trim();
+        if root.is_empty() {
+            v.push("未选择同步目录".into());
+        } else if !std::path::Path::new(root).is_dir() {
+            v.push(format!("同步目录不存在：{root}"));
+        }
 
-    pub fn save(&self) -> Result<()> {
-        std::fs::create_dir_all(Self::dir())?;
-        let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(Self::file(), text)?;
-        Ok(())
+        if let (Some(a), Some(b)) = (self.filter.size_min, self.filter.size_max) {
+            if a >= b {
+                v.push("过滤规则里「最小大小」不应大于等于「最大大小」".into());
+            }
+        }
+
+        v
     }
 
     /// 拼接带 token 与房间名的完整 URL
@@ -139,5 +198,160 @@ impl Config {
             "{}{sep}token={}&workspace={}",
             self.server, self.token, self.workspace
         )
+    }
+}
+
+/// 配置根对象：任务列表 + 全局开关。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Settings {
+    #[serde(default = "settings_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub tasks: Vec<Config>,
+}
+
+fn settings_version() -> u32 {
+    2
+}
+
+impl Settings {
+    /// 读取配置，并处理旧版单任务格式：
+    /// 旧文件是扁平的 `{server, token, workspace, root}`，这里自动包成一个任务，
+    /// 同时把它原来的 state.db 复制到新任务名下，避免丢失共识基线与设备身份。
+    pub fn load() -> Result<Option<Self>> {
+        let path = Config::file();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&path).with_context(|| format!("读取配置 {}", path.display()))?;
+
+        // PowerShell 的 `Set-Content -Encoding utf8` 会写 BOM，serde_json 不接受
+        let text = String::from_utf8_lossy(&bytes);
+        let text = text.trim_start_matches('\u{feff}');
+
+        let value: serde_json::Value = serde_json::from_str(text)
+            .with_context(|| format!("解析配置 {}", path.display()))?;
+
+        if value.get("tasks").is_some() {
+            let mut s: Settings = serde_json::from_value(value)?;
+            for t in &mut s.tasks {
+                if t.id.is_empty() {
+                    t.id = new_id();
+                }
+            }
+            return Ok(Some(s));
+        }
+
+        // 旧格式：单任务
+        let legacy: Config = serde_json::from_value(value)?;
+        let mut task = legacy;
+        if task.id.is_empty() {
+            task.id = new_id();
+        }
+        if task.name.is_empty() {
+            task.name = task.display_name();
+        }
+
+        // 迁移状态库：复制而非移动，万一新版本有问题还能回退
+        let old_db = Config::legacy_state_db();
+        let new_db = task.state_db();
+        if old_db.exists() && !new_db.exists() {
+            if let Some(parent) = new_db.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&old_db, &new_db);
+            tracing::info!(
+                "已把旧状态库迁移到任务 {}（{}）",
+                task.display_name(),
+                new_db.display()
+            );
+        }
+
+        let settings = Settings {
+            version: settings_version(),
+            tasks: vec![task],
+        };
+        // 立刻写回新格式，避免下次启动再走一遍迁移
+        let _ = settings.save();
+        Ok(Some(settings))
+    }
+
+    pub fn save(&self) -> Result<()> {
+        std::fs::create_dir_all(Config::dir())?;
+        let text = serde_json::to_string_pretty(self)?;
+        std::fs::write(Config::file(), text)?;
+        Ok(())
+    }
+
+    pub fn find(&self, id: &str) -> Option<usize> {
+        self.tasks.iter().position(|t| t.id == id || t.name == id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_flat_config_wraps_into_one_task() {
+        let json = r#"{
+            "server": "ws://1.2.3.4:8443/ws",
+            "token": "secret",
+            "workspace": "default",
+            "root": "D:\\Sync"
+        }"#;
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(value.get("tasks").is_none());
+
+        let legacy: Config = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.server, "ws://1.2.3.4:8443/ws");
+        assert_eq!(legacy.mode, SyncMode::Bidirectional);
+        assert!(legacy.filter.ignore_extensions.is_empty());
+        assert!(!legacy.paused);
+        assert!(legacy.id.is_empty(), "旧配置里没有 id，迁移时补");
+    }
+
+    #[test]
+    fn settings_roundtrip_keeps_pause_and_filter() {
+        let mut t = Config::default();
+        t.id = "abcd1234".into();
+        t.name = "文档".into();
+        t.paused = true;
+        t.mode = SyncMode::UploadOnly;
+        t.filter.ignore_dotfiles = true;
+        t.filter.ignore_extensions = vec!["lnk".into()];
+
+        let s = Settings {
+            version: 2,
+            tasks: vec![t],
+        };
+        let text = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.tasks.len(), 1);
+        assert_eq!(back.tasks[0].name, "文档");
+        assert!(back.tasks[0].paused);
+        assert_eq!(back.tasks[0].mode, SyncMode::UploadOnly);
+        assert_eq!(back.tasks[0].filter.ignore_extensions, vec!["lnk".to_string()]);
+    }
+
+    #[test]
+    fn display_name_falls_back_to_folder() {
+        let mut t = Config::default();
+        t.root = r"D:\Data\文档".into();
+        assert_eq!(t.display_name(), "文档");
+        t.name = "自定义".into();
+        assert_eq!(t.display_name(), "自定义");
+    }
+
+    #[test]
+    fn issues_report_missing_and_bad_fields() {
+        let mut t = Config::default();
+        t.server = "http://x".into();
+        t.token = "".into();
+        t.root = "".into();
+        let issues = t.issues();
+        assert!(issues.iter().any(|s| s.contains("ws://")));
+        assert!(issues.iter().any(|s| s.contains("密钥")));
+        assert!(issues.iter().any(|s| s.contains("同步目录")));
     }
 }
