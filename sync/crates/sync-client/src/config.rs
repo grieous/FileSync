@@ -201,13 +201,49 @@ impl Config {
     }
 }
 
-/// 配置根对象：任务列表 + 全局开关。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+/// 配置根对象：任务列表 + 全局设置。
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settings {
     #[serde(default = "settings_version")]
     pub version: u32,
     #[serde(default)]
     pub tasks: Vec<Config>,
+    /// 有新版本时自动更新（当前版本还不支持自动更新，保留字段与开关）
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    /// 记录保留条数，0 = 不限
+    #[serde(default)]
+    pub log_keep_count: u32,
+    /// 记录保留天数，0 = 永久
+    #[serde(default = "default_log_days")]
+    pub log_keep_days: u32,
+    /// 全局限速，KB/s，0 = 不限
+    #[serde(default)]
+    pub limit_up_kbps: u32,
+    #[serde(default)]
+    pub limit_down_kbps: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_log_days() -> u32 {
+    30
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            version: settings_version(),
+            tasks: Vec::new(),
+            auto_update: true,
+            log_keep_count: 0,
+            log_keep_days: default_log_days(),
+            limit_up_kbps: 0,
+            limit_down_kbps: 0,
+        }
+    }
 }
 
 fn settings_version() -> u32 {
@@ -268,8 +304,8 @@ impl Settings {
         }
 
         let settings = Settings {
-            version: settings_version(),
             tasks: vec![task],
+            ..Default::default()
         };
         // 立刻写回新格式，避免下次启动再走一遍迁移
         let _ = settings.save();
@@ -322,8 +358,8 @@ mod tests {
         t.filter.ignore_extensions = vec!["lnk".into()];
 
         let s = Settings {
-            version: 2,
             tasks: vec![t],
+            ..Default::default()
         };
         let text = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();

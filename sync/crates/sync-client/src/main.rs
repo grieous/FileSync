@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use sync_client::{run, Config, Settings};
+use sync_client::{run, Config, Limits, Settings};
 use sync_core::{root_hash, scan_cached, Store};
 
 #[derive(Parser, Debug)]
@@ -194,7 +194,7 @@ async fn cmd_sync(args: &Args) -> Result<()> {
     let cfg = resolve(args)?;
     println!("同步 {} ⇄ {}", cfg.root, cfg.server);
 
-    let report = run(&cfg, None, false, args.force, args.wait).await?;
+    let report = run(&cfg, None, false, args.force, args.wait, Limits::default()).await?;
 
     if report.up_to_date {
         println!("结果：两端已一致，无需传输");

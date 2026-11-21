@@ -55,6 +55,35 @@ pub struct Report {
     pub activities: Vec<Activity>,
 }
 
+/// 全局限速（KB/s），0 表示不限。
+/// 上传限速由本机发送端执行；下载限速由本机接收端执行，两者互不干扰。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Limits {
+    pub up_kbps: u32,
+    pub down_kbps: u32,
+}
+
+/// 简易令牌桶：按累计字节数算出"应该花多久"，比实际快就睡一会儿。
+#[derive(Default)]
+struct RateState {
+    start: Option<std::time::Instant>,
+    bytes: u64,
+}
+
+async fn throttle(st: &mut RateState, n: usize, kbps: u32) {
+    if kbps == 0 {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let start = *st.start.get_or_insert(now);
+    st.bytes += n as u64;
+    let target = st.bytes as f64 * 8.0 / (kbps as f64 * 1024.0);
+    let elapsed = now.duration_since(start).as_secs_f64();
+    if target > elapsed {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(target - elapsed)).await;
+    }
+}
+
 struct Session {
     sink: SplitSink<Ws, Message>,
     stream: SplitStream<Ws>,
@@ -70,6 +99,9 @@ struct Session {
     pushed_ok: HashSet<String>,
     /// 本次从对端成功落地的路径
     pulled_ok: HashSet<String>,
+    limits: Limits,
+    up_rate: RateState,
+    down_rate: RateState,
 }
 
 impl Session {
@@ -367,7 +399,10 @@ impl Session {
                     blake3: e.blake3.clone(),
                 };
                 self.report.bytes_sent += data.len() as u64;
+                let n = data.len();
                 self.send_frame(Frame::Chunk(h, data)).await?;
+                let kbps = self.limits.up_kbps;
+                throttle(&mut self.up_rate, n, kbps).await;
             }
 
             self.send(Msg::FileDone {
@@ -408,7 +443,10 @@ impl Session {
                 Frame::Chunk(h, data) => {
                     if let Some(f) = incoming.get_mut(&h.path) {
                         self.report.bytes_recv += data.len() as u64;
+                        let n = data.len();
                         f.write_chunk(&data)?;
+                        let kbps = self.limits.down_kbps;
+                        throttle(&mut self.down_rate, n, kbps).await;
                     }
                 }
 
@@ -572,6 +610,7 @@ pub async fn run(
     quiet: bool,
     allow_root_change: bool,
     wait_peer_secs: u64,
+    limits: Limits,
 ) -> Result<Report> {
     let db = cfg.state_db();
     let root_str = cfg.root.replace('\\', "/");
@@ -653,6 +692,9 @@ pub async fn run(
         peer_timeout: std::time::Duration::from_secs(wait_peer_secs.max(1)),
         pushed_ok: HashSet::new(),
         pulled_ok: HashSet::new(),
+        limits,
+        up_rate: RateState::default(),
+        down_rate: RateState::default(),
     };
 
     sess.send(Msg::Hello {

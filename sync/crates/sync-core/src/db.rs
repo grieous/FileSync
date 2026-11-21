@@ -306,6 +306,14 @@ impl Store {
         Ok(())
     }
 
+    /// 删除早于 `before`（Unix 秒）的记录。
+    pub fn prune_activities_before(&self, before: i64) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM activity WHERE created_at < ?1", [before])?;
+        Ok(n)
+    }
+
     /// 会话失败时清空 base 的重建路径：整表替换。
     pub fn replace_base(&mut self, entries: &[IndexEntry]) -> Result<()> {
         let tx = self.conn.transaction()?;
