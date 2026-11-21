@@ -489,10 +489,35 @@ CSS 作为字符串内联（`loader: { '.css': 'text' }`），避免额外资源
 ### P2 宿主与工具
 | # | 任务 | 完成标志 |
 |---|---|---|
-| 2.1 | 代理 + SSE 直通 + 错误映射 | 浏览器只访问 dsh 同源，daemon token 不出现在网络面板 |
-| 2.2 | daemon 自动拉起/复用/退出策略 | 杀进程后 UI 一键恢复 |
-| 2.3 | 4 个工具 | 在 dsh 里问「同步状态」能拿到真实数据 |
-| 2.4 | 工具安全 | 返回中无 token；`sync_now` 缺任务时自动选中唯一任务并说明 |
+| 2.1 ✅ | 代理 + SSE 直通 + 错误映射 | 浏览器只访问 dsh 同源，daemon token 不出现在网络面板 |
+| 2.2 ✅ | daemon 自动拉起/复用/退出策略 | 杀进程后 UI 一键恢复 |
+| 2.3 ✅ | 4 个工具 | 在 dsh 里问「同步状态」能拿到真实数据 |
+| 2.4 ✅ | 工具安全 | 返回中无 token；`sync_now` 缺任务时自动选中唯一任务并说明 |
+
+### P2 完成记录（2026-11-21）
+
+宿主半拆成四个纯 ESM 模块（仍不引入构建步骤，`dsh` 直接加载 `lib/*.js`）：
+
+| 文件 | 职责 |
+|---|---|
+| `lib/daemon.js` | 二进制发现（偏好 → 环境变量 → 安装目录 → PATH → 仓库产物）、握手复用/回收、拉起等待、`/api/shutdown` 优雅退出 |
+| `lib/proxy.js` | `/winsync/api/*` 转发：注入 Bearer 与 `X-WinSync-Client`、方法白名单、256 KB 上限、SSE 逐块直通、5xx → 502 `daemon-unavailable` |
+| `lib/tools.js` | `winsync_tasks` / `winsync_status` / `winsync_sync_now` / `winsync_recent_activity` |
+| `lib/prefs.js` | `<state>\plugin.json`：`binPath` / `stopDaemonOnExit` / `autoSpawn` |
+
+与计划的偏离（都是刻意的）：
+
+- **不建 `src/*.ts` + esbuild**：宿主半只有几百行、没有 JSX，直接手写 ESM 省掉一条构建链；客户端半仍是手写 bundle（见 4.1）。
+- **偏好文件放在自己的状态树**（`%LOCALAPPDATA%\dsh-winsync\plugin.json`），不是计划里的 `%APPDATA%\WinSync\dsh-plugin.json`——按「与 exe 互不影响」的硬约束，连一个偏好文件也不共享。
+- **daemon 新增 `POST /api/shutdown`**：插件卸载时先请求优雅退出，避免只能 TerminateProcess 而留下 `daemon.json`。被硬杀时仍由插件的陈旧握手回收兜底。
+- **工具用标准 JSON Schema 直接注册**，不经 `defineTool`：后者对 `parameters` 做 DSL 转换，需要 `@deepseek-ai/dsh-tools` 的裸导入，我们的包不参与打包，避免解析风险。
+
+验收：
+
+- `node test/p2-smoke.mjs`（10 项）：注册 1 条 prefix 路由 + 4 个工具；`/ping` 不泄露 token；`/diag` 真拉起 daemon；
+  经代理建任务、409 `root-changed` 原样透传、404 透传；SSE 首帧 `hello`；3 个只读工具返回契约正确；
+  卸载后 daemon 停止且 `daemon.json` 被清掉。
+- `node test/client-smoke.mjs`：客户端注册契约（main 面板 + sidebar 行）仍通过。
 
 ### P3 界面复刻
 | # | 任务 | 完成标志 |

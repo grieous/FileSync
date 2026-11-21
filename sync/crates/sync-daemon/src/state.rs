@@ -287,6 +287,8 @@ pub struct AppState {
     pub worker_tx: mpsc::UnboundedSender<WorkerMsg>,
     /// 目录监听 → 调度循环
     pub dirty_tx: mpsc::UnboundedSender<String>,
+    /// 插件请求退出：发 true 让 axum 走 graceful shutdown，Drop 才能清掉 daemon.json
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 /// 调度循环的接收端；放在这里是为了只在一处写通道类型。
@@ -309,7 +311,11 @@ pub enum WorkerMsg {
 impl AppState {
     /// 建状态，并把调度循环要用的两个接收端交出去。
     /// 通道只在这里建一次，之后 `AppState` 只持有发送端。
-    pub fn new(boot: BootInfo, settings: Settings) -> (Arc<Self>, WorkerRx, DirtyRx) {
+    pub fn new(
+        boot: BootInfo,
+        settings: Settings,
+        shutdown: tokio::sync::watch::Sender<bool>,
+    ) -> (Arc<Self>, WorkerRx, DirtyRx) {
         let (events, _) = broadcast::channel(1024);
         let (worker_tx, worker_rx) = mpsc::unbounded_channel();
         let (dirty_tx, dirty_rx) = mpsc::unbounded_channel();
@@ -325,6 +331,7 @@ impl AppState {
             events,
             worker_tx,
             dirty_tx,
+            shutdown,
         });
         (state, worker_rx, dirty_rx)
     }

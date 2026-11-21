@@ -105,6 +105,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/open-dir", post(open_dir))
         .route("/api/fs/list", get(fs_list))
         .route("/api/events", get(events_handler))
+        .route("/api/shutdown", post(shutdown))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,
@@ -707,6 +708,14 @@ async fn fs_list(State(state): State<Arc<AppState>>, Query(query): Query<FsQuery
         "parent": view.parent,
         "dirs": view.dirs,
     })))
+}
+
+/// 插件卸载时调用：让服务端走正常退出路径（而不是被 TerminateProcess），
+/// 这样 Drop 能删掉 daemon.json，下次启动不会看到陈旧握手。
+async fn shutdown(State(state): State<Arc<AppState>>) -> ApiResult {
+    crate::state::log_line("收到插件的退出请求，正在关闭");
+    let _ = state.shutdown.send(true);
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn events_handler(

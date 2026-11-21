@@ -202,7 +202,8 @@ async fn main() -> Result<()> {
     )?;
     let _guard = HandshakeGuard(data_dir.join(DAEMON_FILE));
 
-    let (state, worker_rx, dirty_rx) = AppState::new(boot, settings);
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let (state, worker_rx, dirty_rx) = AppState::new(boot, settings, shutdown_tx);
     state.emit(state::Event::State);
 
     let engine_state = state.clone();
@@ -218,7 +219,12 @@ async fn main() -> Result<()> {
         state.boot.data_dir.display()
     );
 
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = shutdown_signal() => {}
+            _ = shutdown_rx.changed() => tracing::info!("收到插件退出请求"),
+        }
+    });
     if let Err(e) = server.await {
         tracing::error!("HTTP 服务异常退出：{e:#}");
         return Err(e.into());

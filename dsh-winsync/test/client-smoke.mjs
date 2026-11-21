@@ -1,22 +1,18 @@
 /**
- * P0 smoke test — no dsh, no browser, no Rust.
+ * client smoke — no dsh, no browser, no Rust.
  *
- * It reproduces the two contracts this package must satisfy, so a regression is
- * caught here instead of by restarting the desktop app:
+ * 它复现客户端那一条契约，让回归在这里被抓住，而不是靠重启桌面端才发现:
  *
- *   1. browser half: the bundle registers its factory through
+ *   browser half: the bundle registers its factory through
  *      `window.__ModuleLoader__.load({ id, factory })`, the factory returns a
  *      Cordis client plugin, and `apply(ctx)` registers the `main` panel plus
  *      the `sidebar.panellist` row that opens it, both under one id.
- *   2. host half: `apply(ctx)` registers a `prefix` route at /winsync/api and the
- *      handler answers /ping over a real socket.
  *
- * Run: node test/p0-smoke.mjs
+ * Run: node test/client-smoke.mjs
  */
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import http from 'node:http'
 
 /* ---------------------------------------------------------------- browser half */
 
@@ -87,60 +83,4 @@ assert.equal(glyph.type, 'svg')
 assert.equal(glyph.props.width, 20)
 assert.equal(glyph.props.height, 20)
 
-/* ------------------------------------------------------------------- host half */
-
-const host = await import('../lib/index.js')
-assert.equal(host.name, 'dsh-winsync')
-assert.deepEqual(host.inject, ['webServer'])
-
-let route
-const disposers = []
-host.apply({
-  effect(factory) {
-    const dispose = factory()
-    disposers.push(dispose)
-    return () => {}
-  },
-  webServer: {
-    register(options) {
-      route = options
-      return () => {}
-    },
-  },
-})
-
-assert.equal(route?.kind, 'prefix')
-assert.equal(route.path, '/winsync/api')
-
-const server = http.createServer((req, res) => route.handler(req, res))
-await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
-const { port } = server.address()
-
-const reply = await new Promise((resolve, reject) => {
-  http
-    .get({ host: '127.0.0.1', port, path: '/winsync/api/ping' }, (res) => {
-      const chunks = []
-      res.on('data', (chunk) => chunks.push(chunk))
-      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }))
-    })
-    .on('error', reject)
-})
-
-assert.equal(reply.status, 200)
-assert.equal(reply.body.ok, true)
-assert.equal(reply.body.plugin, 'dsh-winsync')
-assert.ok(reply.body.runtimeDir.endsWith('dsh-winsync'), 'runtime dir must be plugin-owned, not the exe tree')
-
-const missing = await new Promise((resolve, reject) => {
-  http
-    .get({ host: '127.0.0.1', port, path: '/winsync/api/nope' }, (res) => {
-      res.resume()
-      res.on('end', () => resolve(res.statusCode))
-    })
-    .on('error', reject)
-})
-assert.equal(missing, 404)
-
-server.close()
-
-console.log('P0 smoke: client contract, host route, and runtime dir isolation all pass')
+console.log("client smoke: 注册契约通过")
