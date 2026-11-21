@@ -33,3 +33,8 @@ Thumbs.db
 
 # 工作区里的临时便签，不属于源码
 sync/新建 文本文档.txt
+
+# dsh 插件的诊断产物：CDP 临时浏览器 profile 与截图
+dsh-winsync/test/.cdp-profile/
+dsh-winsync/test/cdp-shot.png
+dsh-winsync/node_modules/

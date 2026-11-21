@@ -1,0 +1,531 @@
+# WinSync × DeepSeek Harness 插件：详细实施计划
+
+> 已选定推荐方案：**Rust daemon + dsh 插件 UI**，界面挂为**全局主区面板**（`main` key=winsync），入口是**左侧栏图标行**（`sidebar.panellist`），并提供 agent 工具。
+> 本文是实施蓝图：文件级拆分、接口契约、任务分解、验收标准。未开始写业务代码。
+
+## 0. 方案边界（一次说清，后面不重复）
+
+- 同步算法**零改动**：`sync-proto` / `sync-core` / `session::run` 原样复用。
+- exe 保留，短期内不重构成 daemon 前端。**两者完全隔离**（用户硬要求，见 §2.8）：不共享目录、不共享互斥体、不互相启停，任一方可独立运行/升级/卸载。
+- daemon 只写自己那棵树：`%LOCALAPPDATA%\dsh-winsync\{config.json, tasks\*.db, sync.log}`；绝不写 exe 的 `%APPDATA%\WinSync`。
+- 界面为深色单主题（与 exe 一致），不跟随 dsh 浅色主题；浅色适配列在 P5。
+- 托盘、原生文件对话框、像素级 1:1 不做（差异已在上一版文档列明）。
+
+## 1. 交付物与仓库布局
+
+```
+sync/
+├── Cargo.toml                      # + members: crates/sync-daemon
+└── crates/
+    ├── sync-daemon/                # 新增（约 700 行 Rust）
+    │   ├── Cargo.toml
+    │   └── src/
+    │       ├── main.rs             # 参数、互斥体、daemon.json、axum 启动
+    │       ├── state.rs            # AppState / TaskRuntime / 共享快照
+    │       ├── engine.rs           # 自动同步调度 + worker 管理（从 GUI 迁移）
+    │       ├── api.rs              # 路由与处理函数
+    │       ├── events.rs           # SSE 广播（broadcast → stream）
+    │       ├── auth.rs             # Bearer + Origin 校验
+    │       ├── fsapi.rs            # /fs/list（root 内目录列举）
+    │       ├── settings_api.rs     # 全局设置、日志清理、自启
+    │       └── win.rs              # 互斥体 / 注册表 / 打开目录（cfg(windows)）
+    └── sync-client/src/bin/winsync-gui.rs   # 不动（后续可选改为 daemon 前端）
+
+dsh-winsync/                        # 新增 npm 包（独立于 Rust workspace）
+├── package.json                    # name, dsh.bundle, dsh.client.inject, files
+├── cordis.patch.yml                # insert 一行：id: winsync, name: dsh-winsync
+├── icon.svg
+├── tsconfig.json                   # 宿主半（Node ESM）
+├── tsconfig.client.json            # 客户端（DOM + React）
+├── scripts/build-client.mjs        # esbuild + ModuleLoader 包装
+├── src/
+│   ├── index.ts                    # 宿主入口：inject / apply
+│   ├── daemon.ts                   # 发现、拉起、健康检查、退出
+│   ├── proxy.ts                    # /winsync/api/* 转发（含 SSE 直通）
+│   ├── tools.ts                    # 4 个 agent 工具
+│   ├── prefs.ts                    # dsh-plugin.json 读写
+│   └── client/
+│       ├── index.tsx               # slots 注册入口
+│       ├── App.tsx                 # 侧栏 + 内容路由
+│       ├── pages/{Tasks,Logs,Settings}.tsx
+│       ├── components/{TaskCard,Wizard,TaskEditor,RawLog,DataTable,Empty,Toast}.tsx
+│       ├── store.ts                # 快照 + SSE 合并 + 动作
+│       ├── api.ts                  # fetch 封装（同源 /winsync/api）
+│       ├── theme.ts                # 设计令牌（与 ui_colors 同值）
+│       └── app.css                 # ws- 前缀类，运行时注入
+└── README.md                       # 安装、开发、与 exe 的差异
+```
+
+## 2. daemon 详细设计
+
+### 2.1 crate 与依赖
+
+```toml
+[package]
+name = "sync-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sync-client.workspace = true
+sync-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+notify.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }   # 需补 features：Threading/Registry/Console/Shell
+```
+
+> 注：workspace 里 `windows-sys` 目前写在 `sync-client` 的 target 段，daemon 需要同样一份；把版本提到 `[workspace.dependencies]` 避免重复。
+
+### 2.2 运行时状态模型
+
+```rust
+pub struct AppState {
+    pub boot: BootInfo,                  // version / pid / config_path / data_dir / token
+    pub settings: RwLock<Settings>,      // 与 config.json 同构
+    pub runtimes: RwLock<Vec<TaskRuntime>>, // 与 settings.tasks 等长、同序
+    pub auto: AtomicBool,                // 自动同步总开关（界面上的 checkbox）
+    pub events: broadcast::Sender<Event>,// SSE
+    pub worker_tx: mpsc::UnboundedSender<WorkerMsg>,
+    pub dirty_tx: mpsc::UnboundedSender<String>, // 目录变更（task id）
+}
+
+pub struct TaskRuntime {
+    pub running: bool,
+    pub progress: Option<Progress>,      // done / total / what
+    pub last: Option<Report>,            // 复用 session::Report
+    pub last_error: Option<String>,
+    pub last_time: Option<i64>,          // Unix 秒
+    pub next_auto_at: Instant,
+    pub logs: VecDeque<String>,          // 上限 400，与 GUI 一致
+    pub watcher: Option<notify::RecommendedWatcher>,
+    pub watch_root: String,
+    pub dirty: bool,
+    pub last_change: Instant,
+}
+```
+
+`Runtime` 的可见字段通过 `/state` 序列化给前端；`Report`/`Progress` 需要加 `Serialize`（`session.rs` 加 `#[derive(Serialize)]`，或用 daemon 侧 DTO 映射——**选 DTO**，避免动 session 的公开类型）。
+
+### 2.3 调度算法（从 GUI `update()` 平移）
+
+```
+loop 每 250ms:
+  1. 取 worker 消息：Event::Log/Progress → 更新 runtime、写 sync.log、广播 SSE
+                     Done(Ok/Err) → running=false、last/last_time/last_error、广播 done + state
+  2. 取 dirty 消息：标记 runtime.dirty=true、last_change=now
+  3. 对每个任务（顺序执行，无重复启动）：
+       if watch_root != root → 重建 watcher（recursive，忽略 Access 事件）
+       if !auto || paused || running → continue
+       due_poll   = now >= next_auto_at
+       due_change = dirty && now-last_change > 3s
+       if (due_poll || due_change) && issues.is_empty():
+           next_auto_at = now + 28..34s（随机抖动）
+           dirty = false
+           start_sync(task)
+  4. 若距上次 state 广播 > 1s 且有变化 → 广播 state
+```
+
+`start_sync`：
+
+```
+校验 issues（不通过 → 直接返回错误，界面红字）
+settings.save()（原子写）
+runtime.running = true
+tokio::spawn:
+    session::run(&cfg, Some(evt_tx), true, true, 25, limits)
+    把 Event 经 std mpsc 转成 WorkerMsg（沿用 GUI 的转发线程写法）
+```
+
+### 2.4 HTTP API 契约
+
+鉴权：所有 `/api/*` 需要 `Authorization: Bearer <boot.token>`；`/health` 免鉴权但只返回 `{ok,version,pid}`。
+
+| 方法 | 路径 | 请求 | 响应 |
+|---|---|---|---|
+| GET | `/health` | — | `{ok:true,version:"0.6.2",pid:1234}` |
+| GET | `/api/state` | — | 见下 |
+| POST | `/api/auto` | `{on:bool}` | `{ok:true,auto:bool}` |
+| POST | `/api/tasks` | `TaskInput` | `{ok:true,task:TaskView}` |
+| PATCH | `/api/tasks/{id}` | `TaskPatch`（字段可选；`token` 空=不改；换目录需 `force:true`） | `{ok:true,task}` 或 `409 root-changed` |
+| DELETE | `/api/tasks/{id}` | — | `{ok:true}`（状态库保留） |
+| POST | `/api/tasks/{id}/sync` | — | `202 {ok:true}`；失败原因 `409 not-ready` |
+| POST | `/api/tasks/{id}/pause` \| `/resume` | — | `{ok:true}` |
+| GET | `/api/activities?task=all\|<id>&status=all\|ok\|fail&q=&limit=500` | — | `{rows:[ActivityView],total}` |
+| DELETE | `/api/activities?task=all\|<id>` | — | `{ok:true,deleted:n}` |
+| GET | `/api/export.csv?task=all\|<id>` | — | `text/csv; charset=utf-8`（表头同 exe） |
+| GET | `/api/logs?task=<id>&limit=400` | — | `{lines:[string]}`（环形缓冲） |
+| GET | `/api/logfile?lines=200` | — | `{lines:[string]}`（`sync.log` 尾部） |
+| POST | `/api/prune` | — | `{ok:true}`（按设置清理 + `VACUUM` 可选） |
+| POST | `/api/autostart` | `{on:bool}` | `{ok:true,on:bool}` |
+| POST | `/api/open-dir` | `{task?:id,path?:string}` | `{ok:true}`（path 必须等于某任务 root） |
+| GET | `/api/fs/list?task=<id>&path=<rel>` | — | `{dirs:[{name,path}],parent?}`，仅目录名 |
+| GET | `/api/events` | — | SSE |
+
+`GET /api/state` 响应（**不含 token**）：
+
+```json
+{
+  "version": "0.6.2",
+  "pid": 1234,
+  "data_dir": "C:\\Users\\gjn86\\AppData\\Roaming\\WinSync",
+  "device": "DESKTOP-XXXX",
+  "auto": true,
+  "settings": { "auto_update": true, "log_keep_count": 0, "log_keep_days": 30,
+                "limit_up_kbps": 64, "limit_down_kbps": 64 },
+  "tasks": [{
+    "id": "ad1c78a5", "name": "Sync", "display_name": "Sync",
+    "server": "ws://192.168.3.222:18443/ws", "server_short": "192.168.3.222:18443",
+    "workspace": "default", "root": "D:\\Sync", "has_token": true,
+    "mode": "bidirectional",
+    "filter": { "ignore_dotfiles": false, "ignore_extensions": [], "size_min": null, "size_max": null },
+    "filter_summary": "无过滤", "filter_sig": "",
+    "paused": false, "issues": [],
+    "runtime": { "running": false, "progress": null,
+                 "last": { "pushed": 3, "pulled": 1, "deleted": 0, "conflicts": 0,
+                           "bytes_sent": 20480, "bytes_recv": 8192, "up_to_date": false },
+                 "last_error": null, "last_time": 1732000000, "next_auto_in": 12 }
+  }]
+}
+```
+
+### 2.5 SSE 协议
+
+```
+event: hello      data: {"version":"0.6.2"}
+event: log        data: {"task":"ad1c78a5","line":"上传 a.txt"}
+event: progress   data: {"task":"ad1c78a5","done":3,"total":8,"what":"上传 b.bin"}
+event: done       data: {"task":"ad1c78a5","report":{...}}          // 或 {"error":"..."}
+event: state      data: {"tasks":[...],"auto":true}                 // 精简态，仅结构变化/暂停/设置时
+: keepalive                                                          // 每 15s
+```
+
+实现：`tokio::sync::broadcast::Sender<Event>` + `futures_util::stream::unfold` 生成 `axum::body::Body::from_stream`；连接断开自动回收。进度事件按任务 200ms 节流，避免刷爆。
+
+### 2.6 单实例、启动与退出
+
+```
+main:
+  init tracing（写自己的 sync.log 同时 stderr）
+  CreateMutexW("Local\\dsh-winsync-daemon-v1")        // 只锁自己，与 exe 的互斥体互不相干
+    - 拿到 → 正常启动
+    - ERROR_ALREADY_EXISTS → 读自己的 daemon.json
+        * /health 有响应 → 打印 already-running，exit 0
+        * pid 已死（陈旧握手）→ 接管：删文件后继续启动
+  bind 127.0.0.1:0 → 取实际端口
+  token = 32 字节随机 hex
+  写 daemon.json {pid, port, token, version, started_at}（用户级 ACL，先写 .tmp 再 rename）
+  axum::serve
+  退出：删 daemon.json、保留日志
+```
+
+`daemon.json` 只给插件读，不进浏览器；插件用它拼 `Authorization`。
+
+**不再检测、不再抢占 exe 的互斥体**：两者可以同时运行。唯一需要协同的是「同一目录不能被两边同时同步」，见 §2.8。
+
+### 2.8 与 exe 的隔离契约（用户硬要求）
+
+| 资源 | exe | daemon | 规则 |
+|---|---|---|---|
+| 配置 | `%APPDATA%\WinSync\config.json` | `%LOCALAPPDATA%\dsh-winsync\config.json` | 各写各的 |
+| 状态库 | `%APPDATA%\WinSync\tasks\<id>.db` | `%LOCALAPPDATA%\dsh-winsync\tasks\<id>.db` | 各写各的 |
+| 日志 | 上述目录的 `sync.log` | 上述目录的 `sync.log` | 各写各的 |
+| 单实例锁 | exe 自己的 | `Local\dsh-winsync-daemon-v1` | 互不相干 |
+| 进程 | 不被 daemon 启停 | 不被 exe 启停 | 各自独立 |
+| 任务集 | exe 的任务 | 插件的任务 | 完全两套，不迁移、不同步 |
+
+实现只需一处**纯增量**改动：`Config::dir()` 支持 `WINSYNC_STATE_DIR` 环境变量覆盖（daemon 启动时设为 `%LOCALAPPDATA%\dsh-winsync`）。exe 不设该变量，行为零变化；`WINSYNC_CONFIG` / `WINSYNC_DB` 已有覆盖能力，`Store::open(path)` 本来就收路径。
+
+**唯一交集：目录重叠检测。** 同步是对文件的写操作，两个进程同步同一个目录必然互相删文件——这是历史上真出过的事故。所以：
+
+- daemon 在「启动任务」和「每轮自动同步前」各查一次；
+- 以**只读**方式读 exe 的 `config.json`（不写、不加锁、失败不影响 exe），比对 root 路径（规范化 + 大小写不敏感 + 互为父子目录都算重叠）；
+- 命中 → 拒绝启动该任务，返回 `code=root-conflict`，文案点名是 exe 的哪个任务占用；
+- 读不到 exe 配置且 `WinSync.exe` 正在运行 → 视为「无法确认」，同样拒绝，除非该任务被显式标记 `allowOverlap: true`（默认 false，界面里是折叠的高级项）。
+
+这一条是唯一会让用户觉得「插件受限」的地方，但它是防止数据损坏的底线。
+
+### 2.7 错误模型
+
+统一 `{ok:false,error:{code,message}}`；code 取值：`not-ready` / `root-conflict` / `root-changed` / `bad-request` / `internal`。前端按 code 给不同提示，不做字符串匹配。
+
+## 3. 插件宿主半
+
+### 3.1 入口
+
+```ts
+export const name = 'dsh-winsync'
+export const inject = ['webServer', 'tools']
+
+export function apply(ctx: Context) {
+  const prefs = loadPrefs()
+  const daemon = createDaemonManager(prefs)          // 懒启动
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix', path: '/winsync/api',
+    handler: (req, res) => proxy(daemon, req, res),  // 注入 Bearer、校验来源
+  }))
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix', path: '/winsync/events',
+    handler: (req, res) => proxySse(daemon, req, res),
+  }))
+  ctx.effect(() => registerTools(ctx.tools, daemon))
+  ctx.effect(() => () => daemon.stopIfOwned(), 'dsh-winsync: daemon')
+}
+```
+
+`inject` 只要 `webServer` + `tools`——不碰 `sessions`/`connection`，减少与 dsh 版本耦合；鉴权用 dsh 自身的同源策略（路由挂在 dsh 的 server 上，浏览器请求天然带会话）。
+
+### 3.2 daemon 生命周期
+
+```
+ensure():
+  1. 读 daemon.json → GET /health（300ms 超时）
+  2. 通 → 复用（记录 owned=false，退出时不杀）
+  3. 不通 → 找二进制：
+        a. prefs.binPath（显式配置）
+        b. %LOCALAPPDATA%\Programs\WinSync\winsync-daemon.exe
+        c. PATH 中 winsync-daemon
+      spawn（detached，hidden window），轮询 /health 最多 5s
+  4. 失败 → 返回结构化错误给 UI：「未找到 winsync-daemon.exe，请先构建或指定路径」
+```
+
+`prefs.json`（`%APPDATA%\WinSync\dsh-plugin.json`）：`{binPath, stopDaemonOnExit:true, autoSpawn:true}`。默认退出即停（与「dsh 关了还在同步」的误解解耦）；要常驻就关掉该开关并开自启。
+
+### 3.3 agent 工具
+
+| 工具 | 入参 | 返回 | 说明 |
+|---|---|---|---|
+| `winsync_tasks` | — | 任务 id/名称/目录/模式/暂停/状态，密钥打码 | 只读 |
+| `winsync_status` | `task?` | running、progress、上次结果、失败原因、下次自动同步倒计时 | 只读 |
+| `winsync_sync_now` | `task?`, `wait?`(默认 false), `timeoutSec?`(≤120) | `{started:true}` 或等待后的 report | 有副作用（可能传播删除），描述里注明 |
+| `winsync_recent_activity` | `task?`, `limit?`(≤200), `onlyFailed?` | path/action/ok/time | 只读，用于「刚才同步了什么」 |
+
+工具返回统一 `{ok:true,data}` 文本化 JSON；错误返回 `{ok:false,error:{code,message}}`，不抛异常。
+`sync_now` 加一句系统提示：调用前应先 `winsync_status` 确认没有正在运行的任务。
+
+### 3.4 代理细节
+
+- 只允许 `GET/POST/PATCH/DELETE`，其余 405。
+- 请求体上限 256 KB（任务配置足够）。
+- 注入 `Authorization` 与 `X-WinSync-Client: dsh-plugin`。
+- SSE：不缓冲、不聚合，逐块 `pipe`；客户端断开即销毁上游连接。
+- 上游 5xx → 502 + `{code:'daemon-unavailable'}`，前端显示「同步服务未启动」并给「重试」按钮。
+
+## 4. 客户端
+
+### 4.1 挂载
+
+```tsx
+export const name = 'dsh-winsync'
+export const inject = ['slots']
+
+export function apply(ctx: Context) {
+  // 全局面板：不绑会话，首页也能进。左侧栏那一行按同一个 id 选中它。
+  ctx.slots.inject('main', () =>
+    ctx.slots.register({ name: 'main', key: 'winsync' }, () => <SyncApp />))
+  ctx.slots.inject('sidebar.panellist', () =>
+    ctx.slots.register({ name: 'sidebar.panellist', id: 'winsync', order: 10,
+                         label: () => '同步' }, WinsyncIcon))
+  ctx.slots.inject('settings.section', () =>
+    ctx.slots.register({ name: 'settings.section', id: 'winsync', order: 60,
+                         label: () => '文件夹同步' }, () => <SettingsSection />))
+}
+```
+
+样式：`app.css` 以字符串导入，`ctx.effect` 插入 `<style data-winsync>`，卸载时移除；所有类名 `ws-` 前缀，避免污染 dsh。
+
+### 4.2 组件树
+
+```
+SyncApp
+├── Sidebar(180px)            Logo / 同步任务 / 同步日志 / 设置 / 底部「+ 创建同步任务」
+├── Content
+│   ├── TasksPage             标题 + 自动同步开关 + 设备行 + 任务卡列表
+│   │   └── TaskCard          图标·名称·状态 / 进度条 / 三列信息 / 立即同步 / ⋯菜单 / 暂停圆钮
+│   ├── LogsPage              任务下拉 + 状态下拉 + 搜索 + 表头 + 斑马纹 + 导出/清空
+│   └── SettingsPage          自启 / 版本 / 日志清理 / 限速 / 诊断 / 当前任务
+├── Wizard（整页，三步）       步骤条 + 表单 + 上一步/取消/下一步
+├── TaskEditor（模态）         名称/服务器/密钥/房间/目录/模式/过滤/签名
+└── RawLog（可拖动浮层）       环形日志，贴底自动滚动
+```
+
+### 4.3 数据流
+
+```
+useSyncStore():
+  state      ← GET /winsync/api/state（进入页面 + 手动刷新）
+  EventSource('/winsync/events')
+      log      → 追加到 runtime.logs（上限 400）
+      progress → 更新卡片进度条
+      done     → 更新 last/last_time，刷新日志页（若在日志页）
+      state    → 合并任务列表
+  动作（同步/暂停/删除/保存/清空/导出）→ POST/PATCH/DELETE → 乐观更新 + 失败回滚 + Toast
+  重连：指数退避 1s→8s，页面重新可见时立即重连
+```
+
+### 4.4 设计令牌（与 `ui_colors` 一一对应）
+
+| 变量 | 值 | 用途 |
+|---|---|---|
+| `--ws-bg` | `#0E0F10` | 内容区底 |
+| `--ws-sidebar` | `#161719` | 侧栏 |
+| `--ws-card` | `#1C1D1F` | 卡片 |
+| `--ws-card-hover` | `#232427` | hover |
+| `--ws-border` | `#2A2C2E` | 分隔线 / 边框 |
+| `--ws-text` | `#EDEDEE` | 主文字 |
+| `--ws-text-2` | `#A0A2A6` | 次要 |
+| `--ws-text-3` | `#6E7176` | 弱化 |
+| `--ws-primary` | `#2B6CF6` | 主按钮 / 选中 |
+| `--ws-primary-dim` | `#1E355C` | 选中底 |
+| `--ws-success` | `#4CC38A` | 成功 |
+| `--ws-danger` | `#F0554D` | 失败 |
+| `--ws-warn` | `#E6A23C` | 同步中 |
+
+字号与圆角：标题 18/15px，正文 12/13px，弱化 11px；卡片圆角 10px，按钮 6px，侧栏项 6px。间距序列 2/4/6/8/10/12/14/16/18。
+
+### 4.5 交互细节（容易漏的）
+
+- 「立即同步」在 `running` 或 `issues` 非空时禁用；禁用原因用 hover title + 状态区红字双写。
+- 密钥字段 `type=password`，保存后显示「已设置」占位，不回显原文；`has_token=false` 时提示「未填写」。
+- 换目录保存：前端先确认（「会清空共识快照，下次全量重建」），后端返回 `root-changed` 再带 `force:true` 重发。
+- 删除任务二次确认，文案说明「状态库保留在 tasks/<id>.db」。
+- 向导第三步实时跑 `issues` 校验预览（`根 ⇄ 主机 · 房间`），不合法逐条红字。
+- 日志页空态「暂无记录」，未选任务时默认当前任务，下拉含「全部任务」。
+- SSE 断开时顶部黄条「实时连接中断，正在重连」，不阻塞操作。
+
+### 4.6 与 exe 的差异（写进 README）
+
+托盘菜单、`浏览…` 原生对话框、单窗口标题栏、系统图标、离线时的「等待对端上线」超时提示条（改为页内状态）。
+
+## 5. 构建与安装
+
+```bash
+# Rust
+cd sync
+cargo build --release -p sync-daemon        # → target/release/winsync-daemon.exe
+cargo test --workspace
+
+# 插件
+cd ../dsh-winsync
+npm install
+npm run build                                # 宿主 tsc + 客户端 esbuild 包装
+
+# 安装到 desktop profile（本地目录）
+dsh plugin --profile desktop add file:C:\Users\gjn86\WorkBuddy\spaces\2026_11_19_20-38-45\dsh-winsync
+# 或：npm pack → dsh plugin --profile desktop add ./dsh-winsync-0.1.0.tgz
+```
+
+客户端打包（`scripts/build-client.mjs`）关键点：
+
+```js
+// esbuild: bundle src/client/index.tsx → CJS，外部化 react 与官方包
+// 再包一层 ModuleLoader，id 必须与包名一致
+const wrapped = `window.__ModuleLoader__.load({id:"dsh-winsync",factory:function(require){
+  var module={exports:{}},exports=module.exports;
+  ${cjs}
+  return module.exports;
+}});`
+```
+
+CSS 作为字符串内联（`loader: { '.css': 'text' }`），避免额外资源文件与路由。
+
+安装后重启 dsh，主区应出现「同步」标签；控制台不得出现 `duplicate prefix route` 或 slot 重复注册。
+
+## 6. 里程碑与任务分解
+
+### P0 冒烟（最高未知项，先做）
+| # | 任务 | 完成标志 |
+|---|---|---|
+| 0.1 | `dsh-winsync` 骨架（package.json / patch / icon / tsconfig） | `dsh plugin add` 成功，bundles 出现该包 |
+| 0.2 | 宿主 `index.ts` 注册 `/winsync/api/ping` | curl 返回 `{ok:true}` |
+| 0.3 | 客户端注册 `main` 面板 + `sidebar.panellist` 图标行 | dsh 重启后左侧栏出现「同步」，点击后主区显示面板（首页即可，无需开会话） |
+| 0.4 | 卸载验证 | 移除插件后标签消失、无残留样式/路由 |
+
+> 0.3 不过就地停：说明 ModuleLoader 包装或 slot props 不对，改到能跑再往下。
+
+### P1 daemon 引擎
+| # | 任务 | 完成标志 |
+|---|---|---|
+| 1.1 | crate 骨架、自有互斥体、`daemon.json`、`/health` | 双击运行后文件生成，重复启动被拒；exe 同时在跑也不受影响 |
+| 1.2 | `/api/state` 只读快照 | curl 能读到现有任务与设置 |
+| 1.3 | 任务 CRUD（含换目录 force、校验） | 与 exe 生成的 `config.json` 结构一致 |
+| 1.4 | 调度 + watcher + `session::run` 接入 | 触发同步后 events 流有 log/progress/done |
+| 1.5 | 活动查询、CSV 导出、日志环形/落盘、日志清理 | 导出文件与 exe 导出逐行一致 |
+| 1.6 | 限速、自启、打开目录、`/fs/list` | 限速生效可用 `--wait` 场景验证；路径穿越被拒 |
+| 1.7 | 单测 | 调度抖动、`issues` 拦截、root-changed、鉴权失败 4 组用例 |
+
+### P2 宿主与工具
+| # | 任务 | 完成标志 |
+|---|---|---|
+| 2.1 | 代理 + SSE 直通 + 错误映射 | 浏览器只访问 dsh 同源，daemon token 不出现在网络面板 |
+| 2.2 | daemon 自动拉起/复用/退出策略 | 杀进程后 UI 一键恢复 |
+| 2.3 | 4 个工具 | 在 dsh 里问「同步状态」能拿到真实数据 |
+| 2.4 | 工具安全 | 返回中无 token；`sync_now` 缺任务时自动选中唯一任务并说明 |
+
+### P3 界面复刻
+| # | 任务 | 完成标志 |
+|---|---|---|
+| 3.1 | 设计令牌 + 侧栏 + 页面骨架 | 三页可切换，180px 侧栏，色值与表一致 |
+| 3.2 | 任务卡 + 进度 + 状态 + ⋯菜单 + 暂停 | 三档宽度（≥1000 / 800 / 640）不塌 |
+| 3.3 | 创建向导三步 | 校验、沿用连接、返回/取消行为与 exe 一致 |
+| 3.4 | 任务设置弹窗 | 保存/暂停/删除全通，密钥不回显 |
+| 3.5 | 日志页表格 | 筛选/搜索/斑马纹/导出/清空 |
+| 3.6 | 设置页 + 运行日志浮层 | 与 exe 条目一一对应（含禁用态说明） |
+| 3.7 | 空态/错误态/断线态 | 每页各有明确引导文案，无白屏 |
+
+### P4 联调与交付
+| # | 任务 | 完成标志 |
+|---|---|---|
+| 4.1 | 两端实测：双向 / 仅上传 / 仅下载 | 文件与删除行为符合 README 的同步行为表 |
+| 4.2 | 安全阀：过滤不一致、删除熔断、目录不一致 | 三种情况都中止并给出可读原因 |
+| 4.3 | 隔离与共存：exe 与 daemon 同时运行 | 两边任务各自独立、配置互不写；同目录任务被 `root-conflict` 拦下 |
+| 4.4 | 回归：`cargo test --workspace` | 全绿（现有 18 项 + 新增 4 项） |
+| 4.5 | 文档：README + 差异清单 + 排障 | 覆盖「标签不见了 / 服务未启动 / 找不到 exe」三类问题 |
+
+## 7. 测试矩阵
+
+| 场景 | 手段 | 期望 |
+|---|---|---|
+| 首次启动无配置 | 清空 config.json | 空态引导，不报错 |
+| 旧版扁平配置 | 放入 v0.2 格式 config | 自动迁移为一个任务，基线保留 |
+| 任务换目录 | PATCH 不带 force → 带 force | 先 409，再成功且 base 清空 |
+| 过滤不一致 | 两端不同规则 | 会话中止，日志写明双方签名 |
+| 删除熔断 | 对端清空 30+ 文件 | 中止并列出路径 |
+| 限速 | 64 KB/s 传 2 MB | 实际耗时 ≥ 30s |
+| SSE 断线 | 杀 daemon → 重启 | 前端 8s 内恢复，期间不丢操作（按钮置灰 + Toast） |
+| 大目录 | 3000 文件 | 打开日志页 < 200ms，扫描复用缓存 |
+| 并发运行 | exe 在跑时启 daemon | 两者同时存活，各写各的 config/DB，互不报错 |
+| 目录重叠 | 插件任务 root 与 exe 任务 root 相同或互为父子 | 拒绝启动，`root-conflict` 点名占用任务，文件零改动 |
+| 心跳隔离 | 退出 exe | daemon 与页面无感知，同步继续 |
+| 鉴权 | 无 Bearer 请求 `/api/state` | 401，且不泄露任何任务信息 |
+
+## 8. 风险与回滚
+
+| 风险 | 触发信号 | 回滚动作 |
+|---|---|---|
+| slot 或 ModuleLoader 不兼容 | P0 加载失败 | 只删 `dsh-winsync` 目录与 bundles 条目，dsh 恢复原状（不动 profile 其他插件） |
+| daemon 与 exe 抢锁 | 启动即退 2 | 属预期保护；文档引导「关一个」 |
+| 路由与现有插件冲突 | 启动报 duplicate prefix | 换前缀 `/winsync-v1/*`（已预留版本号） |
+| 写入损坏配置 | JSON 解析失败 | daemon 启动时 `config.json` 先备份 `.bak-<date>` 再写；复用 exe 的原子写 |
+| 浏览器缓存旧 client 包 | 改了 UI 不生效 | 构建产物文件名带 hash，patch 里指向 `lib/client.<hash>.js`；README 写清重启步骤 |
+
+## 9. 首日必须跑通的三个点
+
+1. `dsh plugin add file:` 能装上，重启后左侧栏 `sidebar.panellist` 出现「同步」图标行，点击切到主区面板。
+2. `ctx.webServer.register` 的 `/winsync/api/ping` 能被页面 fetch 到（同源、带会话）。
+3. `winsync-daemon.exe` 在 dsh 插件里被 spawn 起来，`/health` 通，退出后 `daemon.json` 清理干净。
+
+三点任一不通过，都先停下来解决，不进 P1。
+
+---
+
+确认这份计划后，我按 P0 → P1 → P2 → P3 → P4 执行；每期结束给出可验证的结果（curl 输出、截图或测试记录），不会一口气做完再给你看。

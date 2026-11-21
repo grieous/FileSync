@@ -1,0 +1,32 @@
+{
+  "name": "dsh-winsync",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "WinSync inside DeepSeek Harness — P0 skeleton (probe only)",
+  "author": "gjn86",
+  "license": "UNLICENSED",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/p0-probe.cjs",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.0-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}

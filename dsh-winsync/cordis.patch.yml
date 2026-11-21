@@ -1,0 +1,6 @@
+# Bundle patch layer: mount the package's main entry as the host half.
+# The `dsh.client` declaration in package.json makes the web app load
+# ./client as the browser half.
+- insert:
+    - id: winsync
+      name: dsh-winsync
