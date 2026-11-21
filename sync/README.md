@@ -90,11 +90,26 @@ WINSYNC_CONFIG=.tmp/b.json WINSYNC_DB=.tmp/b.db winsync.exe --root .tmp/b sync
 
 ## 尚未实现
 
-- 实时文件监听（`notify`），目前靠手动或 30 秒轮询
 - 托盘常驻 / 开机自启 / Windows 服务
-- 断点续传（4 GB 文件断开会重来）
+- 断点续传（大文件断开会重来）
 - 重命名优化（改名会重传整个文件）
 - 带宽限速、安装包、自动更新
+- TLS 内建（目前明文 `ws://`，公网需前置 nginx / Caddy）
+
+已完成的关键保护：目录实时监听（`notify`，3 秒去抖 + 30 秒轮询兜底）、删除熔断（单次 >20 个或 >基线 30% 即中止）、配置校验与 BOM 兼容、日志落盘 `%APPDATA%\WinSync\sync.log`、单实例互斥。
+
+## 排查
+
+```powershell
+# 版本、设备身份、配置路径
+winsync-cli.exe where
+winsync-cli.exe scan
+
+# 运行日志（每次连接、配对、推送/拉取计数）
+Get-Content "$env:APPDATA\WinSync\sync.log" -Tail 20
+```
+
+服务端日志里应该能看到两台**不同**的 device_id 各自加入房间并「配对成功」。只出现一个，说明另一台根本没发起连接（配置不完整或目录不存在）。
 
 ## 两个容易踩的坑
 
