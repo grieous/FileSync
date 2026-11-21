@@ -30,3 +30,6 @@ sync.log
 .idea/
 .DS_Store
 Thumbs.db
+
+# 工作区里的临时便签，不属于源码
+sync/新建 文本文档.txt
