@@ -10,7 +10,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -79,6 +81,9 @@ fn main() -> eframe::Result<()> {
             .show();
         return Ok(());
     }
+
+    // 托盘线程先起来：它自己泵消息，不依赖界面刷新。
+    spawn_tray();
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([640.0, 760.0])
@@ -223,48 +228,161 @@ fn app_icon() -> Option<(u32, u32, Vec<u8>)> {
     Some((w as u32, h as u32, rgba))
 }
 
-#[cfg(windows)]
-struct Tray {
-    _icon: tray_icon::TrayIcon,
-    open: tray_icon::menu::MenuItem,
-    sync: tray_icon::menu::MenuItem,
-    auto: tray_icon::menu::MenuItem,
-    quit: tray_icon::menu::MenuItem,
+/// 托盘动作。托盘线程只负责「把意图记下来 + 把窗口叫出来」，
+/// 真正的同步动作由界面线程执行（它才持有 App 状态）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayAction {
+    Open,
+    SyncNow,
+    ToggleAuto,
+    Quit,
 }
 
-#[cfg(windows)]
-fn build_tray() -> Option<Tray> {
-    use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
+static TRAY_QUEUE: Mutex<Vec<TrayAction>> = Mutex::new(Vec::new());
+static TRAY_READY: AtomicBool = AtomicBool::new(false);
+static CTX: OnceLock<egui::Context> = OnceLock::new();
 
-    let open = MenuItem::with_id("open", "打开主界面", true, None);
-    let sync = MenuItem::with_id("sync", "立即同步", true, None);
-    let auto = MenuItem::with_id("auto", "暂停自动同步", true, None);
-    let quit = MenuItem::with_id("quit", "退出", true, None);
+fn tray_ready() -> bool {
+    TRAY_READY.load(Ordering::Relaxed)
+}
 
-    let menu = Menu::new();
-    let _ = menu.append(&open);
-    let _ = menu.append(&sync);
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&auto);
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&quit);
+/// 取走托盘线程攒下的动作。
+fn drain_tray_actions() -> Vec<TrayAction> {
+    TRAY_QUEUE
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
+}
 
-    let (w, h, rgba) = app_icon()?;
-    let icon = tray_icon::Icon::from_rgba(rgba, w, h).ok()?;
-    let tray = tray_icon::TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_tooltip("WinSync — 文件夹同步")
-        .with_icon(icon)
-        .build()
-        .ok()?;
+fn push_action(a: TrayAction) {
+    if let Ok(mut q) = TRAY_QUEUE.lock() {
+        q.push(a);
+    }
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
+    if matches!(a, TrayAction::Open) {
+        show_main_window();
+    }
+}
 
-    Some(Tray {
-        _icon: tray,
-        open,
-        sync,
-        auto,
-        quit,
-    })
+fn window_title() -> String {
+    format!("WinSync v{} — 文件夹同步", env!("CARGO_PKG_VERSION"))
+}
+
+/// 把窗口从隐藏/最小化状态叫回来。
+/// 除了通知 egui，还直接调 Win32：窗口隐藏时 egui 的视口命令不一定被处理。
+fn show_main_window() {
+    if let Some(ctx) = CTX.get() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        };
+        let wide: Vec<u16> = window_title()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+/// 托盘必须活在自己的消息泵里。
+/// 之前把它建在界面线程、靠 update() 取菜单事件；窗口一隐藏 eframe 就不再调用
+/// update()，菜单事件永远没人取，表现就是「托盘图标点不动」。
+fn spawn_tray() {
+    #[cfg(windows)]
+    std::thread::spawn(|| {
+        use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+
+        let open = MenuItem::with_id("open", "打开主界面", true, None);
+        let sync = MenuItem::with_id("sync", "立即同步", true, None);
+        let auto = MenuItem::with_id("auto", "暂停 / 恢复自动同步", true, None);
+        let quit = MenuItem::with_id("quit", "退出", true, None);
+
+        let menu = Menu::new();
+        let _ = menu.append(&open);
+        let _ = menu.append(&sync);
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&auto);
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&quit);
+
+        let Some((w, h, rgba)) = app_icon() else {
+            return;
+        };
+        let Ok(icon) = tray_icon::Icon::from_rgba(rgba, w, h) else {
+            return;
+        };
+        let built = tray_icon::TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
+            .with_tooltip("WinSync — 文件夹同步")
+            .with_icon(icon)
+            .build();
+
+        let Ok(_tray) = built else {
+            log_line("托盘创建失败，按普通窗口程序运行");
+            return;
+        };
+
+        MenuEvent::set_event_handler(Some(Box::new(|ev: MenuEvent| match ev.id.0.as_str() {
+            "open" => push_action(TrayAction::Open),
+            "sync" => push_action(TrayAction::SyncNow),
+            "auto" => push_action(TrayAction::ToggleAuto),
+            "quit" => push_action(TrayAction::Quit),
+            _ => {}
+        })));
+
+        tray_icon::TrayIconEvent::set_event_handler(Some(Box::new(
+            |ev: tray_icon::TrayIconEvent| {
+                if matches!(
+                    ev,
+                    tray_icon::TrayIconEvent::Click { .. }
+                        | tray_icon::TrayIconEvent::DoubleClick { .. }
+                ) {
+                    push_action(TrayAction::Open);
+                }
+            },
+        )));
+
+        TRAY_READY.store(true, Ordering::Relaxed);
+        log_line("托盘已就绪：关闭窗口不会退出，点击图标可打开主界面");
+
+        // 该线程的 message pump：托盘与菜单都靠它分发消息
+        unsafe {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, GetMessageW, TranslateMessage, MSG,
+            };
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    });
+}
+
+/// 托盘线程也要能写日志（它拿不到 App）。
+fn log_line(s: &str) {
+    let dir = Config::dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("sync.log"))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "[{}] {}", stamp_full(), s);
+    }
 }
 
 struct App {
@@ -311,9 +429,8 @@ struct App {
     /// 最后一次变更时间，用于去抖
     last_change: Instant,
 
-    /// 托盘。创建失败时为 None，程序退化为普通窗口程序（不能因为托盘挂了就打不开）。
-    #[cfg(windows)]
-    tray: Option<Tray>,
+    /// 托盘是否创建成功。成功才把"关窗口"改成"隐藏到托盘"。
+    tray_ready: bool,
     /// 走托盘菜单退出：此时不再拦截关窗事件
     quitting: bool,
     /// 「已隐藏到托盘」只提示一次
@@ -375,15 +492,19 @@ impl App {
             watch_root: String::new(),
             dirty: false,
             last_change: Instant::now(),
-            #[cfg(windows)]
-            tray: build_tray(),
+            tray_ready: false,
             quitting: false,
             hidden_notice: false,
         };
 
-        #[cfg(windows)]
-        if app.tray.is_some() {
-            app.log("托盘已就绪：关闭窗口不会退出，同步继续运行");
+        // 托盘在自己的线程里创建并泵消息，这里只等它就绪（最多 1 秒）。
+        let deadline = Instant::now() + Duration::from_millis(1000);
+        while Instant::now() < deadline && !tray_ready() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        app.tray_ready = tray_ready();
+        if !app.tray_ready {
+            app.log("托盘不可用：关闭窗口将直接退出");
         }
 
         if let Some(e) = load_err {
@@ -547,57 +668,36 @@ const MB: f64 = 1024.0 * 1024.0;
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ---- 托盘菜单 / 双击图标 ----
-        #[cfg(windows)]
-        {
-            while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-                match ev.id.0.as_str() {
-                    "open" => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    }
-                    "sync" => self.start_sync(120),
-                    "auto" => {
-                        self.auto = !self.auto;
-                        let text = if self.auto {
-                            "暂停自动同步"
-                        } else {
-                            "恢复自动同步"
-                        };
-                        if let Some(t) = &self.tray {
-                            let _ = t.auto.set_text(text);
-                        }
-                        self.log(if self.auto {
-                            "已恢复自动同步"
-                        } else {
-                            "已暂停自动同步"
-                        });
-                    }
-                    "quit" => {
-                        self.quitting = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    _ => {}
+        // 把 Context 交给托盘线程，让它在没有界面刷新时也能请求重绘/显示窗口
+        let _ = CTX.set(ctx.clone());
+
+        // ---- 托盘动作 ----
+        for action in drain_tray_actions() {
+            match action {
+                TrayAction::Open => {} // 窗口已由托盘线程直接叫出
+                TrayAction::SyncNow => self.start_sync(120),
+                TrayAction::ToggleAuto => {
+                    self.auto = !self.auto;
+                    self.log(if self.auto {
+                        "已恢复自动同步"
+                    } else {
+                        "已暂停自动同步"
+                    });
                 }
-            }
-            while let Ok(ev) = tray_icon::TrayIconEvent::receiver().try_recv() {
-                if matches!(ev, tray_icon::TrayIconEvent::DoubleClick { .. }) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                TrayAction::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
         }
 
         // 关窗口 = 隐藏到托盘（同步继续）。真正退出走托盘菜单。
-        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
-            #[cfg(windows)]
-            if self.tray.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                if !self.hidden_notice {
-                    self.log("已隐藏到托盘，同步继续运行（退出请用托盘菜单）");
-                    self.hidden_notice = true;
-                }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.tray_ready {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            if !self.hidden_notice {
+                self.log("已隐藏到托盘，同步继续运行（点托盘图标或右键菜单打开）");
+                self.hidden_notice = true;
             }
         }
 
@@ -779,9 +879,10 @@ impl eframe::App for App {
             Tab::Settings => self.ui_settings(ui),
         });
 
-        if self.running || self.auto {
-            ctx.request_repaint_after(Duration::from_millis(250));
-        }
+        // 始终按 250ms 唤醒：托盘动作、后台消息都靠它被处理。
+        // 之前只在「正在同步或开了自动同步」时才要求重绘，用户关掉自动同步后
+        // 界面就彻底静止，托盘菜单点了也没反应。
+        ctx.request_repaint_after(Duration::from_millis(250));
     }
 }
 
