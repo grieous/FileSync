@@ -63,6 +63,42 @@ pub struct Filter {
     pub size_max: Option<u64>,
 }
 
+/// 内建跳过规则的版本号。改动 `is_conflict_copy` 之类的逻辑时必须 +1，
+/// 让跨版本配对失败而不是产生删除传播。
+pub const BUILTIN_RULES_VER: u32 = 1;
+
+/// 冲突副本命名：`名字.conflict-<设备8位>-<yyyymmdd>-<hhmmss>[.ext]`，
+/// 原名没有扩展名时是 `名字.conflict-...`，连原名都没有时才退化成
+/// `conflict-<设备8位>-<yyyymmdd>-<hhmmss>`。
+///
+/// 这类文件是接收端在"两边都改过"时把**本机旧版本**留下的备份，纯本地留存，
+/// 不参与同步。否则每次冲突都会在每台设备上增殖一份，还会互相传播。
+///
+/// 这里做严格格式匹配而不是简单 `contains(".conflict-")`：用户自己的文件
+/// 叫 `冲突.conflict-说明.txt` 也不该被静默排除在同步之外。
+pub fn is_conflict_copy(name: &str) -> bool {
+    let rest = if let Some(i) = name.find(".conflict-") {
+        &name[i + ".conflict-".len()..]
+    } else if let Some(r) = name.strip_prefix("conflict-") {
+        r
+    } else {
+        return false;
+    };
+    // 去掉尾部扩展名：`...-133030.txt`
+    let rest = rest.split('.').next().unwrap_or(rest);
+    match rest.split('-').collect::<Vec<_>>().as_slice() {
+        [dev, date, time] => {
+            dev.len() == 8
+                && dev.bytes().all(|b| b.is_ascii_hexdigit())
+                && date.len() == 8
+                && date.bytes().all(|b| b.is_ascii_digit())
+                && time.len() == 6
+                && time.bytes().all(|b| b.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
 impl Default for Filter {
     fn default() -> Self {
         // 默认不过滤任何东西。开启过滤会让已有共识失效，
@@ -85,6 +121,11 @@ impl Filter {
     }
 
     /// 规范化签名，用于两端比对。扩展名排序去重，保证等价配置得到相同字符串。
+    ///
+    /// 末尾的 `bi` 是**内建规则版本**，不是用户配置。冲突副本这类由程序自己
+    /// 生成的文件不该参与同步，但"跳过"必须两端一致，否则一端有、一端没有
+    /// 就会被判成删除。把它计入签名，跨版本配对会直接被拒绝并提示升级，
+    /// 而不是悄悄删文件。
     pub fn signature(&self) -> String {
         let mut ext: Vec<String> = self
             .ignore_extensions
@@ -95,11 +136,12 @@ impl Filter {
         ext.sort();
         ext.dedup();
         format!(
-            "dot={};ext={};min={};max={}",
+            "dot={};ext={};min={};max={};bi={}",
             self.ignore_dotfiles as u8,
             ext.join(","),
             self.size_min.map(|v| v.to_string()).unwrap_or_default(),
-            self.size_max.map(|v| v.to_string()).unwrap_or_default()
+            self.size_max.map(|v| v.to_string()).unwrap_or_default(),
+            BUILTIN_RULES_VER
         )
     }
 
@@ -206,6 +248,11 @@ pub fn scan_cached(
 
             // 传输中途的临时文件永远不该进索引
             if name.ends_with(".synctmp") {
+                stats.skipped += 1;
+                continue;
+            }
+            // 冲突副本只在本地留存，不往外传（规则版本见 BUILTIN_RULES_VER）
+            if is_conflict_copy(&name) {
                 stats.skipped += 1;
                 continue;
             }
@@ -412,7 +459,48 @@ pub fn diff(
         }
     }
 
+    resolve_conflicts(&mut plan, remote);
     plan
+}
+
+/// 冲突必须选出一方来「推」。
+///
+/// `diff` 在两端对称执行：A 端算出「冲突 + 拉取」，B 端也算出「冲突 + 拉取」，
+/// 而只有 `push` 会真的发数据，`pull` 只是「期待对方发」。两端都在等对方，
+/// 于是一个字节也不会传，日志里只剩「冲突 1、拉取 1」，文件永远不动。
+///
+/// 判定用 mtime 较新者胜；落在同一秒时再比内容哈希取大者。
+/// 两边算出的结论必然一致 —— mtime 比较对调两端仍然成立，哈希不同则「大于」
+/// 严格只有一方成立，因此不会出现双方都判自己赢。
+///
+/// 输的一方不丢数据：接收侧会先把本地版本改名成 `.conflict-<设备>-<时间>`
+/// 副本再落地对方内容。
+fn resolve_conflicts(plan: &mut Plan, remote: &HashMap<String, IndexEntry>) {
+    if plan.conflicts.is_empty() {
+        return;
+    }
+    let conflicts = std::mem::take(&mut plan.conflicts);
+    for e in conflicts {
+        let local_wins = match remote.get(&e.path) {
+            Some(r) => e.mtime > r.mtime || (e.mtime == r.mtime && e.blake3 > r.blake3),
+            None => true,
+        };
+        if local_wins {
+            plan.pull.retain(|p| p.path != e.path);
+            if !plan.push.iter().any(|p| p.path == e.path) {
+                plan.push.push(e.clone());
+            }
+        } else {
+            plan.push.retain(|p| p.path != e.path);
+            if let Some(r) = remote.get(&e.path) {
+                if !plan.pull.iter().any(|p| p.path == e.path) {
+                    plan.pull.push(r.clone());
+                }
+            }
+        }
+        // 保留冲突清单用于展示与「落地前留副本」的判断
+        plan.conflicts.push(e);
+    }
 }
 
 #[cfg(test)]
@@ -431,6 +519,69 @@ mod tests {
 
     fn map(items: Vec<IndexEntry>) -> HashMap<String, IndexEntry> {
         items.into_iter().map(|e| (e.path.clone(), e)).collect()
+    }
+
+    fn fm(path: &str, digest: &str, mtime: i64) -> IndexEntry {
+        IndexEntry {
+            mtime,
+            ..f(path, digest)
+        }
+    }
+
+    /// 冲突必须选出一方推送，否则两端都只拉取、互相等待，永远不动。
+    #[test]
+    fn conflict_newer_side_pushes() {
+        let base = map(vec![]);
+        let local = map(vec![fm("a", "2", 200)]);
+        let remote = map(vec![fm("a", "3", 100)]);
+        let p = diff(&base, &local, &remote);
+        assert_eq!(p.conflicts.len(), 1, "应记录冲突");
+        assert_eq!(p.push.len(), 1, "本地更新，应由本地推送");
+        assert!(p.pull.is_empty(), "本地赢时不应再期望拉取");
+    }
+
+    /// 换到对端视角，结论必须相反：只有一方推，不会双方都推或都不推。
+    #[test]
+    fn conflict_winner_is_symmetric() {
+        let base = map(vec![]);
+        let a = fm("x", "aaa", 100);
+        let b = fm("x", "bbb", 200);
+
+        let from_a = diff(&base, &map(vec![a.clone()]), &map(vec![b.clone()]));
+        let from_b = diff(&base, &map(vec![b.clone()]), &map(vec![a.clone()]));
+
+        assert_eq!(
+            (from_a.push.len(), from_b.push.len()),
+            (0, 1),
+            "mtime 较旧的 A 不应推送，较新的 B 应推送"
+        );
+        assert_eq!(
+            (from_a.pull.len(), from_b.pull.len()),
+            (1, 0),
+            "A 应拉取、B 不应拉取"
+        );
+    }
+
+    /// 同一秒内改动时退化到比哈希，同样保证两端结论一致。
+    #[test]
+    fn conflict_same_mtime_breaks_tie_by_hash() {
+        let base = map(vec![]);
+        let a = fm("x", "aaa", 100);
+        let b = fm("x", "bbb", 100);
+
+        let from_a = diff(&base, &map(vec![a.clone()]), &map(vec![b.clone()]));
+        let from_b = diff(&base, &map(vec![b.clone()]), &map(vec![a.clone()]));
+
+        assert_eq!(
+            from_a.push.len() + from_b.push.len(),
+            1,
+            "必须恰好一方推送，不能都推或都不推"
+        );
+        assert_eq!(
+            from_a.pull.len() + from_b.pull.len(),
+            1,
+            "必须恰好一方拉取"
+        );
     }
 
     #[test]
@@ -574,7 +725,8 @@ mod tests {
     }
 
     #[test]
-    fn signature_is_order_insensitive() {        let a = Filter {
+    fn signature_is_order_insensitive() {
+        let a = Filter {
             ignore_dotfiles: true,
             ignore_extensions: vec!["LNK".into(), ".tmp".into()],
             ..Default::default()
@@ -586,5 +738,30 @@ mod tests {
         };
         assert_eq!(a.signature(), b.signature());
         assert_ne!(a.signature(), Filter::default().signature());
+    }
+
+    #[test]
+    fn signature_carries_builtin_rules_ver() {
+        // 内建跳过规则必须体现在签名里，否则新旧版本混跑会互相误删。
+        let sig = Filter::default().signature();
+        assert!(
+            sig.contains(&format!("bi={BUILTIN_RULES_VER}")),
+            "签名缺少内建规则版本：{sig}"
+        );
+    }
+
+    #[test]
+    fn conflict_copies_are_not_scanned() {
+        let root = tmpdir("conflict-skip");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("report.txt"), b"new").unwrap();
+        std::fs::write(root.join("report.conflict-88ab12cd-20261121-133030.txt"), b"old").unwrap();
+        std::fs::write(root.join("conflict-88ab12cd-20261121-133030"), b"orphan").unwrap();
+
+        let kept = scan_with(&root, &Filter::default()).unwrap();
+        let names: Vec<&str> = kept.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(names, vec!["report.txt"], "冲突副本不该进索引：{names:?}");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

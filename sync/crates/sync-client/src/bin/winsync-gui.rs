@@ -214,11 +214,16 @@ const MB: f64 = 1024.0 * 1024.0;
 fn main() -> eframe::Result<()> {
     #[cfg(windows)]
     if !acquire_single_instance() {
-        rfd::MessageDialog::new()
-            .set_title("WinSync")
-            .set_description("WinSync 已经在运行了。\n请在任务栏或托盘里找到已有的窗口。")
-            .set_level(rfd::MessageLevel::Info)
-            .show();
+        // 已经有实例在跑：把它的窗口叫到前台，然后自己悄悄退出。
+        // 弹「已经在运行了」再让用户自己去托盘找，是双开用户最讨厌的体验。
+        if !show_main_window() {
+            // 极端情况：进程还在但窗口没建出来（正在启动/卡住），才提示。
+            rfd::MessageDialog::new()
+                .set_title("WinSync")
+                .set_description("WinSync 已经在运行了。\n请在任务栏或托盘里找到已有的窗口。")
+                .set_level(rfd::MessageLevel::Info)
+                .show();
+        }
         return Ok(());
     }
 
@@ -300,11 +305,11 @@ fn setup_style(ctx: &egui::Context) {
     v.hyperlink_color = ui_colors::PRIMARY;
     v.selection.bg_fill = ui_colors::PRIMARY_DIM;
     v.widgets.noninteractive.bg_fill = ui_colors::CARD;
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, ui_colors::BORDER);
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, ui_colors::BORDER);
     v.widgets.inactive.bg_fill = ui_colors::CARD_HOVER;
-    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, ui_colors::BORDER);
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, ui_colors::BORDER);
     v.widgets.hovered.bg_fill = ui_colors::CARD_HOVER;
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ui_colors::PRIMARY);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, ui_colors::PRIMARY);
     v.widgets.active.bg_fill = ui_colors::PRIMARY_DIM;
     ctx.set_visuals(v);
 }
@@ -350,7 +355,7 @@ fn window_title() -> String {
     format!("WinSync v{} — 文件夹同步", env!("CARGO_PKG_VERSION"))
 }
 
-fn show_main_window() {
+fn show_main_window() -> bool {
     if let Some(ctx) = CTX.get() {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -359,7 +364,7 @@ fn show_main_window() {
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
         };
         let wide: Vec<u16> = window_title()
             .encode_utf16()
@@ -367,10 +372,15 @@ fn show_main_window() {
             .collect();
         let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
         if !hwnd.is_null() {
+            // 窗口可能在托盘里（SW_HIDE），先显式显示再还原，只发 SW_RESTORE 对
+            // 隐藏窗口不生效。
+            ShowWindow(hwnd, SW_SHOW);
             ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
+            return true;
         }
     }
+    false
 }
 
 fn spawn_tray() {
@@ -1253,7 +1263,7 @@ impl App {
                     let frame = egui::Frame::none()
                         .fill(ui_colors::CARD)
                         .stroke(egui::Stroke::new(
-                            if selected { 1.0 } else { 0.5 },
+                            if selected { 1.0_f32 } else { 0.5_f32 },
                             if selected {
                                 ui_colors::PRIMARY
                             } else {
@@ -1332,7 +1342,7 @@ impl App {
                         ui.painter().hline(
                             ui.available_rect_before_wrap().x_range(),
                             ui.cursor().top(),
-                            egui::Stroke::new(0.5, ui_colors::BORDER),
+                            egui::Stroke::new(0.5_f32, ui_colors::BORDER),
                         );
                         ui.add_space(10.0);
 
@@ -1472,7 +1482,7 @@ impl App {
                     .map(|t| t.display_name())
                     .unwrap_or_else(|| "当前任务".to_string())
             };
-            egui::ComboBox::from_id_source("rec_task")
+            egui::ComboBox::from_id_salt("rec_task")
                 .selected_text(egui::RichText::new(current).size(12.0))
                 .width(150.0)
                 .show_ui(ui, |ui| {
@@ -1500,7 +1510,7 @@ impl App {
                 2 => "失败",
                 _ => "全部",
             };
-            egui::ComboBox::from_id_source("rec_status")
+            egui::ComboBox::from_id_salt("rec_status")
                 .selected_text(egui::RichText::new(status_text).size(12.0))
                 .width(100.0)
                 .show_ui(ui, |ui| {
@@ -1576,7 +1586,7 @@ impl App {
         ui.painter().hline(
             ui.available_rect_before_wrap().x_range(),
             ui.cursor().top(),
-            egui::Stroke::new(0.5, ui_colors::BORDER),
+            egui::Stroke::new(0.5_f32, ui_colors::BORDER),
         );
         ui.add_space(2.0);
 
@@ -1746,7 +1756,7 @@ impl App {
                         0 => "不限".to_string(),
                         n => format!("{} 万条", n / 10_000),
                     };
-                    egui::ComboBox::from_id_source("keep_count")
+                    egui::ComboBox::from_id_salt("keep_count")
                         .selected_text(egui::RichText::new(text).size(12.0))
                         .width(140.0)
                         .show_ui(ui, |ui| {
@@ -1785,7 +1795,7 @@ impl App {
                         0 => "永久".to_string(),
                         d => format!("{d} 天"),
                     };
-                    egui::ComboBox::from_id_source("keep_days")
+                    egui::ComboBox::from_id_salt("keep_days")
                         .selected_text(egui::RichText::new(text).size(12.0))
                         .width(140.0)
                         .show_ui(ui, |ui| {
@@ -2197,7 +2207,7 @@ impl App {
         ui.painter().hline(
             ui.available_rect_before_wrap().x_range(),
             ui.cursor().top(),
-            egui::Stroke::new(0.5, ui_colors::BORDER),
+            egui::Stroke::new(0.5_f32, ui_colors::BORDER),
         );
         ui.add_space(16.0);
 
@@ -2424,11 +2434,11 @@ fn draw_folder(ui: &mut egui::Ui) {
     p.circle_filled(c, 7.0, ui_colors::SUCCESS);
     p.line_segment(
         [c + egui::vec2(-3.5, 0.0), c + egui::vec2(-1.0, 2.6)],
-        egui::Stroke::new(1.6, egui::Color32::WHITE),
+        egui::Stroke::new(1.6_f32, egui::Color32::WHITE),
     );
     p.line_segment(
         [c + egui::vec2(-1.0, 2.6), c + egui::vec2(3.5, -2.4)],
-        egui::Stroke::new(1.6, egui::Color32::WHITE),
+        egui::Stroke::new(1.6_f32, egui::Color32::WHITE),
     );
 }
 
@@ -2442,7 +2452,7 @@ fn pause_button(ui: &mut egui::Ui, paused: bool) -> bool {
     } else {
         ui_colors::TEXT_2
     };
-    p.circle_stroke(rect.center(), 12.0, egui::Stroke::new(1.0, color));
+    p.circle_stroke(rect.center(), 12.0, egui::Stroke::new(1.0_f32, color));
     if paused {
         // 播放三角
         p.add(egui::Shape::convex_polygon(

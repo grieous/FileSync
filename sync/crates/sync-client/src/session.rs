@@ -311,6 +311,16 @@ impl Session {
                                      请两端都升级到同一版本，或先关闭过滤规则。"
                                 );
                             }
+                        } else if !peer_sig.contains("bi=") {
+                            // 老版本签名里没有内建规则版本段。这是单向升级后的
+                            // 典型状态：两边的「忽略规则」其实一模一样，差别只在
+                            // 程序版本。直接说清楚，别让用户去翻规则配置。
+                            bail!(
+                                "对端版本比本机旧（缺少内建规则版本），已中止本次同步。\n\
+                                 新版本会跳过冲突副本这类程序自己生成的文件，两端规则不一致时\n\
+                                 继续同步会把它们误判成删除。\n\
+                                 请把对端升级到同一版本后重试。"
+                            );
                         } else {
                             bail!(
                                 "两端的过滤规则不一致，已中止本次同步。\n\
@@ -706,7 +716,8 @@ pub async fn run(
     sess.emit(scan_msg);
 
     // 对端索引的 (路径 -> 内容哈希)，用于事后判定"哪些路径双方确实一致"
-    let mut peer_hash: HashMap<String, String> = HashMap::new();
+    // 两个分支都会给它赋值，不预置空表。
+    let peer_hash: HashMap<String, String>;
 
     let report = match {
         sess.wait_peer().await?;
@@ -745,6 +756,17 @@ pub async fn run(
                 .map(|(k, v)| (k.clone(), v.blake3.clone()))
                 .collect();
             let mut plan = diff(&base, &local_map, &remote_map);
+
+            // 冲突裁决已由 diff 内部完成（见 sync_core::index::resolve_conflicts）：
+            // 按 mtime 较新者胜，败方保留为 .conflict-<设备>-<时间> 副本。
+            // 放在 diff 里而不是这里，是因为任何调用方都需要这个不变量，
+            // 少做一次就会退化成「两端都只拉取、互相等待」。
+            if !plan.conflicts.is_empty() {
+                sess.emit(format!(
+                    "冲突 {} 项：按修改时间较新的一方为准，另一份保留为冲突副本",
+                    plan.conflicts.len()
+                ));
+            }
 
             // 按同步模式裁剪计划：单向模式下主动放弃另一个方向的动作。
             // 这里只是"不做"，不改 base——被放弃的差异下次还会被算出，
@@ -880,6 +902,14 @@ pub async fn run(
                     || peer_hash
                         .get(&e.path)
                         .is_some_and(|h| *h == e.blake3)
+                    // 或者它本来就在共识里且本地没再变过。
+                    // 少了这一条，一次"什么都没做"的会话（比如对端离线、
+                    // 单向模式跳过、冲突尚未推进）就会把共识条目整批抹掉，
+                    // 之后两端的 base 同时缺失，差异判断退化成对称的
+                    // 「双方都新增」，冲突永远推不动。
+                    || base
+                        .get(&e.path)
+                        .is_some_and(|b| b.blake3 == e.blake3 && b.size == e.size)
             })
             .collect();
         store.replace_base(&confirmed)?;
