@@ -129,6 +129,8 @@ dsh plugin --profile desktop install --force
 | 进了同步页退不出来 | 点 dsh 左侧栏里的任意会话，或按 `Ctrl+B` 收起/展开侧栏 | 主区槽由宿主 `layout.selectPanel(null)` 接管；插件不再自带返回按钮 |
 | 同步「看着很慢」 | 设置里的限速是不是非 0 | 1.5 MB @ 256 KB/s 实测 6.6 秒。旧版本把 KB/s 当 kbit/s，慢 8 倍，见 `sync/README.md` |
 | 报 `Connection reset without closing handshake` | 房间是不是已经满了（一个房间最多 2 端） | 中继发完 `Bye` 立刻断 socket，客户端只看得到协议错误。先确认没有第二个进程/任务连同一个房间；对端残留的旧会话要重启 exe 才会断 |
+| 报 `HTTP error: 401 Unauthorized` / 「密钥与服务器不一致」 | 任务的密钥和中继启动时的 `SYNC_TOKEN` 不一样 | 密钥是**中继侧**的单一口令，不是每台设备自拟的密码。改任务密钥后要保存；编辑弹窗里留空表示不修改 |
+| 报 `连接服务器失败（ws://host:8443/ws）` 且是 10061 | 地址里没写端口，被补成了默认 8443 | 在服务器地址里写 `host:18443` 这种带端口的；输入框下面会实时显示「将连接 …」 |
 
 ## 测试
 

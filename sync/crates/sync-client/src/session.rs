@@ -700,9 +700,19 @@ pub async fn run(
 
     // 连不上时把**解析后的地址**带上：用户只填了 IP 时，默认端口（8443）到底补成什么，
     // 只有在这里能看到。不带 token——url() 里含密钥，不能进日志和界面。
+    // 401 单独翻译：中继只在密钥不匹配时回 401，原始信息只有一句 "HTTP error: 401"，
+    // 用户会以为服务器坏了或密码框没生效。
     let (ws, _) = tokio_tungstenite::connect_async(cfg.url().as_str())
         .await
-        .with_context(|| format!("连接服务器失败（{}）", cfg.server))?;
+        .map_err(|e| {
+            let hint = if matches!(&e, tokio_tungstenite::tungstenite::Error::Http(resp) if resp.status() == 401)
+            {
+                "：密钥与服务器不一致，请核对中继启动时的 SYNC_TOKEN"
+            } else {
+                ""
+            };
+            anyhow!("连接服务器失败（{}）{hint}：{e}", cfg.server)
+        })?;
     let (sink, stream) = ws.split();
 
     let mut sess = Session {

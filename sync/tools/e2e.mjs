@@ -114,7 +114,7 @@ function writeConfig(stateDir, task) {
         id: task.id ?? 'p4',
         name: task.name ?? 'P4',
         server: task.server,
-        token: TOKEN,
+        token: task.token ?? TOKEN,
         workspace: task.workspace,
         root: task.root,
         mode: task.mode ?? 'bidirectional',
@@ -170,7 +170,7 @@ function contains(text, needle, message) {
 /* ------------------------------------------------------------------ 场景骨架 */
 
 /** 一个对端：状态目录 + 同步目录 + 配置，三者一一对应。 */
-function makePeer(name, { server, workspace, mode, filter, root }) {
+function makePeer(name, { server, workspace, mode, filter, root, token = TOKEN }) {
   const base = path.join(WORK, current.name, name)
   const peer = {
     name,
@@ -179,7 +179,7 @@ function makePeer(name, { server, workspace, mode, filter, root }) {
   }
   fs.rmSync(base, { recursive: true, force: true })
   fs.mkdirSync(peer.root, { recursive: true })
-  writeConfig(peer.state, { server, workspace, mode, filter, root: peer.root })
+  writeConfig(peer.state, { server, workspace, mode, filter, root: peer.root, token })
   return peer
 }
 
@@ -360,6 +360,19 @@ scenario('filter-mismatch', async (ctx) => {
   ok(leftFiles['keep.txt'] !== undefined && leftFiles['cache.tmp'] !== undefined, '左端文件零改动',
     JSON.stringify(leftFiles))
   eq(Object.keys(filesOf(right)), ['other.txt'], '右端文件零改动（没收到 .tmp，也没丢 other.txt）')
+})
+
+/* ------------------------------------------------------------------ 4.2 密钥不匹配 */
+
+scenario('auth', async (ctx) => {
+  const peer = makePeer('wrong-token', { ...ctx, token: 'not-the-relay-token' })
+  writeTree(peer.root, { 'a.txt': 'A' })
+
+  const round = await cliSync(peer.state)
+  ok(round.code !== 0, '密钥错误：连接被拒绝（非零退出）')
+  contains(round.out, '连接服务器失败', '报错说明是连接阶段失败')
+  contains(round.out, '密钥与服务器不一致', '把 401 翻译成「密钥不一致」而不是裸 HTTP 错误')
+  contains(round.out, 'ws://127.0.0.1', '报错里带上解析后的服务器地址')
 })
 
 /* ------------------------------------------------------------------ 4.2 删除熔断 */
