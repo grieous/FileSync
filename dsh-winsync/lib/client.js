@@ -271,6 +271,39 @@ window.__ModuleLoader__.load({
       return `${scheme ? scheme[1].toLowerCase() : 'ws'}://${host}${path}`
     }
 
+    /**
+     * 房间码：32 位随机串，同时也是配对凭证。
+     * 中继只按房间名配对、不维护名单，所以「猜不到的房间名」就是门禁——
+     * 给别人用的时候不用再去服务器加一条配置。
+     */
+    function newRoomCode() {
+      const buf = new Uint8Array(16)
+      if (globalThis.crypto?.getRandomValues) {
+        globalThis.crypto.getRandomValues(buf)
+      } else {
+        for (let i = 0; i < buf.length; i += 1) buf[i] = Math.floor(Math.random() * 256)
+      }
+      return `k${Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')}`
+    }
+
+    /** 一条消息就能发走的邀请串：`ws://host:port/ws#房间码`。 */
+    function inviteOf(server, room) {
+      const url = normalizeServer(server)
+      const code = String(room ?? '').trim()
+      return code ? `${url}#${code}` : url
+    }
+
+    /** 反过来：把粘贴进来的邀请串拆成服务器 + 房间码；不是邀请串返回 null。 */
+    function parseInvite(text) {
+      const raw = String(text ?? '').trim()
+      const hash = raw.lastIndexOf('#')
+      if (hash <= 0) return null
+      const server = raw.slice(0, hash)
+      const room = raw.slice(hash + 1).trim()
+      if (!room || /\s/.test(room)) return null
+      return { server, room }
+    }
+
     /** 记录页把相对路径拼回磁盘绝对路径（任务目录 + 相对路径），分隔符统一成反斜杠。 */
     function fullPath(root, rel) {
       // 任务目录可能是正斜杠（API 建的任务）也可能是反斜杠（界面填的），先统一成反斜杠。
@@ -1032,6 +1065,16 @@ window.__ModuleLoader__.load({
       const [showToken, setShowToken] = React.useState(false)
 
       // 密钥从不回传到 /state（那里只有 has_token），只有点「显示」时才按需取一次。
+      const copyInvite = async () => {
+        const text = inviteOf(form.server, form.workspace)
+        try {
+          await navigator.clipboard.writeText(text)
+          store.notify('邀请已复制，发给对方即可', 'ok')
+        } catch {
+          store.notify(`复制失败，可手动复制：${text}`, 'bad')
+        }
+      }
+
       const revealToken = async () => {
         const next = !showToken
         if (next && form.token === '' && task.has_token) {
@@ -1048,7 +1091,8 @@ window.__ModuleLoader__.load({
       const body = (force) => ({
         name: form.name,
         server: normalizeServer(form.server),
-        token: form.token,
+        // 房间码同时就是配对凭证；中继开放模式下不校验它
+        token: form.workspace,
         workspace: form.workspace,
         root: form.root,
         mode: form.mode,
@@ -1125,31 +1169,24 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-field' },
-              h('label', null, '密钥'),
+              h('label', null, '房间码'),
               h(
                 'div',
                 { className: 'ws-field-row' },
                 h('input', {
                   className: 'ws-input',
-                  type: showToken ? 'text' : 'password',
-                  value: form.token,
-                  placeholder: task.has_token ? '已设置（留空表示不修改）' : '必填',
-                  onChange: (e) => setForm({ ...form, token: e.target.value }),
+                  value: form.workspace,
+                  onChange: (e) => setForm({ ...form, workspace: e.target.value }),
                 }),
                 h(
                   'button',
-                  { type: 'button', className: 'ws-btn', onClick: () => void revealToken() },
-                  showToken ? '隐藏' : '显示',
+                  { type: 'button', className: 'ws-btn', onClick: () => void copyInvite() },
+                  '复制邀请',
                 ),
               ),
-              h(
-                'div',
-                { className: 'ws-hint' },
-                '中继为这个房间配的密钥；留空表示不修改，点「显示」可回看已保存的值',
-              ),
+              h('div', { className: 'ws-hint' }, '双方必须相同；点「复制邀请」把整串发对方'),
+              h('div', { className: 'ws-hint ws-mono' }, inviteOf(form.server, form.workspace)),
             ),
-            input('房间名', 'workspace', { hint: '两台设备必须相同' }),
-            input('本机目录', 'root', { hint: '绝对路径；目录不存在会自动创建' }),
             h(
               'div',
               { className: 'ws-field' },
@@ -1213,7 +1250,8 @@ window.__ModuleLoader__.load({
       const [form, setForm] = React.useState({
         server: '',
         token: '',
-        workspace: 'default',
+        // 默认就生成一个随机房间码：不用再想名字，也不用去中继登记
+        workspace: newRoomCode(),
         root: '',
         name: '',
         mode: 'bidirectional',
@@ -1222,12 +1260,11 @@ window.__ModuleLoader__.load({
       })
 
       const issues = []
-      if (!form.token.trim()) issues.push('未填写密钥')
+      if (!form.workspace.trim()) issues.push('未填写房间码')
       // 只校验「补全之后」是不是一个合法地址，用户不需要关心 ws:// 和 /ws。
       if (!/^wss?:\/\/[^\s/]+/.test(normalizeServer(form.server))) {
         issues.push('只填服务器 IP 或 IP:端口即可')
       }
-      if (!form.workspace.trim()) issues.push('未填写房间名')
       if (step >= 1) {
         if (!form.root.trim()) issues.push('未选择同步目录')
         else if (!/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(form.root.trim())) {
@@ -1245,7 +1282,7 @@ window.__ModuleLoader__.load({
                 body: {
                   name: form.name,
                   server: normalizeServer(form.server),
-                  token: form.token,
+                  token: form.workspace,
                   workspace: form.workspace,
                   root: form.root,
                   mode: form.mode,
@@ -1295,7 +1332,13 @@ window.__ModuleLoader__.load({
                 className: 'ws-input',
                 value: form.server,
                 placeholder: '192.168.3.222 或 192.168.3.222:18443',
-                onChange: (e) => setForm({ ...form, server: e.target.value }),
+                onChange: (e) => {
+                  const text = e.target.value
+                  // 直接粘贴对方的邀请串：服务器 + 房间码一次填完
+                  const invite = parseInvite(text)
+                  if (invite) setForm({ ...form, server: invite.server, workspace: invite.room })
+                  else setForm({ ...form, server: text })
+                },
               }),
               h(
                 'div',
@@ -1306,6 +1349,11 @@ window.__ModuleLoader__.load({
                 'div',
                 { className: 'ws-hint ws-mono' },
                 `将连接 ${normalizeServer(form.server) || '（待填写）'}`,
+              ),
+              h(
+                'div',
+                { className: 'ws-hint' },
+                '也可以直接粘贴对方给你的邀请串（ws://ip:port/ws#房间码），会一次填好',
               ),
             ),
             h(
@@ -1340,13 +1388,27 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-field' },
-              h('label', null, '房间名'),
-              h('input', {
-                className: 'ws-input',
-                value: form.workspace,
-                onChange: (e) => setForm({ ...form, workspace: e.target.value }),
-              }),
-              h('div', { className: 'ws-hint' }, '两台设备必须相同，例如 default'),
+              h('label', null, '房间码'),
+              h(
+                'div',
+                { className: 'ws-field-row' },
+                h('input', {
+                  className: 'ws-input',
+                  value: form.workspace,
+                  onChange: (e) => setForm({ ...form, workspace: e.target.value }),
+                }),
+                h(
+                  'button',
+                  { type: 'button', className: 'ws-btn', onClick: () => void copyInvite() },
+                  '复制邀请',
+                ),
+              ),
+              h(
+                'div',
+                { className: 'ws-hint' },
+                '随机生成，双方填同一个；对方粘邀请串就不用填这一项',
+              ),
+              h('div', { className: 'ws-hint ws-mono' }, inviteOf(form.server, form.workspace)),
             ),
           )
         }

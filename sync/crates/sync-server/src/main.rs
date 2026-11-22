@@ -146,15 +146,16 @@ async fn main() {
         )
         .init();
 
+    // 两种部署方式：
+    //   - 不配密钥表：开放配对，安全靠「房间码不可猜」（客户端默认生成 32 位随机码）
+    //   - 配了 rooms 表：逐房间校验，用于需要固定口令的场合
     let room_keys = RoomKeys::from_env();
-    if !room_keys.configured() {
-        tracing::error!(
-            "未配置房间密钥：请设置 SYNC_ROOMS=<rooms.json> 或 SYNC_ROOM_TOKENS='{{\"*\":\"密钥\"}}' 后重启"
-        );
-        std::process::exit(2);
+    if room_keys.configured() {
+        let key_count = room_keys.debug_room_count();
+        tracing::info!("已启用房间密钥（{key_count} 条，含 \"*\" 兜底）：密钥不对或房间没配都会拒绝");
+    } else {
+        tracing::info!("未配置房间密钥：开放配对，靠客户端生成的随机房间码保证不可猜");
     }
-    let key_count = room_keys.debug_room_count();
-    tracing::info!("已启用房间级密钥（{key_count} 条，含 \"*\" 兜底）：密钥不对或房间没配都会拒绝");
     let addr = std::env::var("SYNC_ADDR").unwrap_or_else(|_| "0.0.0.0:8443".to_string());
 
     let state = AppState {
