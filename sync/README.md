@@ -120,11 +120,11 @@ E2E_VERBOSE=1 node tools/e2e.mjs        # 打印每一轮同步的完整输出
 | `filter-mismatch` | 两端都中止并各自打印双方签名，文件零改动 |
 | `delete-fuse` | 删 1 项放行；删 24 项两端中止，提示要删多少，对端文件一个没少 |
 | `root-change` | 换目录不带 `--force` 拒绝执行；带 `--force` 才重建基线 |
-| `daemon-cli` | daemon(HTTP) ⇄ CLI 互操作：双向落地、`/api/export.csv` 表头与转义、`PATCH /api/settings` 只改传入字段 |
+| `daemon-cli` | daemon(HTTP) ⇄ CLI 互操作：双向落地、`/api/export.csv` 表头与转义、`PATCH /api/settings` 只改传入字段、SSE 连接中仍能干净退出 |
 | `rate-limit` | 256 KB/s 传 1.5 MB 实测 6.4s（理论 6.1s）；解除限速后 0.27s |
 | `isolation` | exe 已同步目录（含父目录包含）→ 409 `root-conflict`；exe 的 `config.json` 内容与 mtime 都不动 |
 
-当前结果：**76 项断言全过**；`cargo test --workspace` 41 项全绿。
+当前结果：**77 项断言全过**（debug / release 各一遍）；`cargo test --workspace` 41 项全绿。
 
 联调抓到的真问题：**限速把 KB/s 当成了 kbit/s**（`bytes*8/(kbps*1024)`），
 256 KB/s 实际只有 32 KB/s——1.5 MB 要 48 秒而不是 6 秒。已改成

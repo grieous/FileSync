@@ -211,6 +211,19 @@ async fn main() -> Result<()> {
 
     let app = api::router(state.clone());
 
+    // 兜底退出：收到退出请求后最多等 3 秒。SSE 流已经会跟着 watch 结束，
+    // 但万一还有别的长连接（半死的客户端、卡住的 chunked 响应），
+    // 不能让插件退出时留下一个孤儿 daemon——那会一直占着状态目录和端口。
+    // 硬退出不清 daemon.json，插件侧有「按 pid 判活」的陈旧握手回收。
+    let mut backstop = shutdown_rx.clone();
+    tokio::spawn(async move {
+        if backstop.changed().await.is_ok() {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            tracing::warn!("优雅退出超时，强制结束");
+            std::process::exit(0);
+        }
+    });
+
     tracing::info!(
         "dsh-winsync {} 已启动 pid={} port={} dir={}",
         state.boot.version,

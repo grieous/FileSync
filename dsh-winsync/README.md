@@ -127,7 +127,7 @@ node test/p2-smoke.mjs       # 宿主：路由、代理、CRUD 透传、SSE、�
 node test/cdp-inspect.mjs <url> [port] [--aria=同步]   # 真实页面里的渲染与截图
 
 # 同步本体（双端、安全阀、限速、与 exe 的隔离）在仓库根的 sync/tools/
-node ../sync/tools/e2e.mjs   # 76 项断言：真 relay + 两个真对端，约 25 秒
+node ../sync/tools/e2e.mjs   # 77 项断言：真 relay + 两个真对端，约 25 秒
 
 # 分步视觉走查（需要先起一个实例）：空态→向导三步→任务卡→日志→设置→窄态
 CDP_SIZE=1440,960 node test/cdp-p3.mjs "<url>" [port]   # 截图落在 test/shots/

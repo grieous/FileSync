@@ -671,7 +671,7 @@ console 零报错。
 每个场景独立房间 + 独立状态目录 + 独立目录树。产物在 `.tmp/p4/`（已 gitignore）。
 
 ```bash
-node sync/tools/e2e.mjs                 # 9 个场景、76 项断言，约 25 秒
+node sync/tools/e2e.mjs                 # 9 个场景、77 项断言，约 25 秒
 node sync/tools/e2e.mjs --only fuse     # 名字子串过滤
 E2E_VERBOSE=1 node sync/tools/e2e.mjs   # 打印每轮同步的完整输出
 ```
@@ -684,7 +684,7 @@ E2E_VERBOSE=1 node sync/tools/e2e.mjs   # 打印每轮同步的完整输出
 | `filter-mismatch` | 两端都中止、各自打印双方签名、文件零改动 | 6/6 |
 | `delete-fuse` | 删 1 项放行；删 24 项中止且对端一个没少 | 9/9 |
 | `root-change` | 不带 `--force` 拒绝；带上才重建基线 | 7/7 |
-| `daemon-cli` | daemon ⇄ CLI 双向落地；CSV 表头与转义；`PATCH /api/settings` 只改传入字段 | 16/16 |
+| `daemon-cli` | daemon ⇄ CLI 双向落地；CSV 表头与转义；`PATCH /api/settings` 只改传入字段；SSE 连接中仍能干净退出 | 17/17 |
 | `rate-limit` | 256 KB/s 传 1.5 MB = 6.6s（理论 6.1s）；解除后 0.26s | 8/8 |
 | `isolation` | 同目录/父目录 → 409 `root-conflict`；exe 的 config 内容与 mtime 都不动 | 9/9 |
 
@@ -699,6 +699,16 @@ E2E_VERBOSE=1 node sync/tools/e2e.mjs   # 打印每轮同步的完整输出
 **换目录的语义要在文档里说清。** 单端换目录并 `--force` 后，新目录里没有的文件在对端会被判成
 「本机已删除」：大目录会被熔断拦住，小目录则静默消失。README 已把它列进「容易踩的坑」，
 建议两端一起换，或先确认新目录已包含旧内容。
+
+**面板开着时 daemon 退不掉。** 停机走 axum 的 graceful shutdown，它会等所有连接关闭；
+而 `/api/events` 的 SSE 是长连接、平时一句话不说，于是 `POST /api/shutdown` 一直挂在
+「正在关闭」，`daemon.json` 也清不掉（实测旧进程要 `Stop-Process` 才能结束）。
+修了两处：
+
+- SSE 流里 `tokio::select!` 同时监听 `shutdown` 的 watch，退出信号一到就结束流；
+- 主进程加 3 秒兜底：优雅退出超时就 `exit(0)`（硬退出不清握手文件，插件侧按 pid 判活回收）。
+
+`e2e.mjs` 里新增一条断言：SSE 保持连接时发退出请求，3 秒内 `daemon.json` 必须消失。
 
 ## 7. 测试矩阵
 

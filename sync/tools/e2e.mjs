@@ -230,6 +230,8 @@ async function startDaemon({ state, appdata }) {
   }
   return {
     api,
+    url: `http://127.0.0.1:${port}`,
+    token,
     out: () => out,
     async stop() {
       child.kill()
@@ -503,6 +505,25 @@ scenario('daemon-cli', async (ctx) => {
     eq(after.body?.settings?.limit_up_kbps, 64, '限速字段已更新')
     eq(after.body?.settings?.log_keep_days, before.body?.settings?.log_keep_days, '未传的字段保持原值')
     eq(after.body?.tasks?.length, before.body?.tasks?.length, 'PATCH 设置不影响任务列表')
+
+    // 退出：SSE 还连着时也必须干净收尾。
+    // axum 的 graceful shutdown 会等连接关闭，而 SSE 是长连接、平时不说话——
+    // 少了「随退出信号结束流」的 select，面板开着时点退出会一直挂着。
+    const controller = new AbortController()
+    const sse = fetch(`${child.url}/api/events`, {
+      headers: { authorization: `Bearer ${child.token}` },
+      signal: controller.signal,
+    }).catch(() => null)
+    await sleep(400) // 让 SSE 真正连上
+    await api('/api/shutdown', { method: 'POST' })
+    let handshakeGone = false
+    for (let i = 0; i < 30 && !handshakeGone; i += 1) {
+      await sleep(100)
+      handshakeGone = !fs.existsSync(path.join(state, 'daemon.json'))
+    }
+    controller.abort()
+    await sse
+    ok(handshakeGone, 'SSE 还连着时也能在 3 秒内干净退出（握手文件已删）')
   } finally {
     await child.stop()
   }
