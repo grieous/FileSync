@@ -34,8 +34,11 @@ window.__ModuleLoader__.load({
 .ws-side{width:180px;flex:0 0 180px;background:#161719;border-right:1px solid #2A2C2E;
   display:flex;flex-direction:column;padding:14px 12px 12px}
 .ws-brand{display:flex;align-items:center;gap:8px;padding:2px 4px 0}
-.ws-mark{width:28px;height:28px;border-radius:8px;background:#2B6CF6;color:#fff;
-  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px}
+/* 品牌位只留一个线条图标，和 dsh 自己的侧栏图标同一种做法：无底色块、
+   currentColor、18px、1.5 描边。之前是蓝色圆角块 + 白字 W，太像第三方 App 的
+   logo，放在 dsh 的灰度图标里很跳。 */
+.ws-mark{display:flex;align-items:center;justify-content:center;color:#C9CBCF;
+  padding:1px 0}
 .ws-brand-name{font-size:15px;font-weight:600;color:#EDEDEE}
 .ws-nav{margin-top:18px;display:flex;flex-direction:column;gap:2px}
 .ws-nav-item{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border:0;
@@ -47,8 +50,6 @@ window.__ModuleLoader__.load({
 .ws-nav-item:focus-visible,.ws-btn:focus-visible,.ws-icon-btn:focus-visible{
   outline:2px solid #2B6CF6;outline-offset:1px}
 .ws-side-foot{margin-top:auto;padding-top:10px;border-top:1px solid #24262A}
-.ws-back{color:#8B8E94;font-size:12px;margin-bottom:2px}
-.ws-back:hover{color:#EDEDEE}
 .ws-content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .ws-scroll{overflow:auto;padding:18px 24px 32px;flex:1}
 .ws-scroll::-webkit-scrollbar,.ws-raw-body::-webkit-scrollbar{width:8px;height:8px}
@@ -109,6 +110,10 @@ window.__ModuleLoader__.load({
 .ws-table tbody tr:nth-child(even){background:#121315}
 .ws-table tbody tr:nth-child(even):hover{background:#1A1B1D}
 .ws-table tbody tr:last-child td{border-bottom:0}
+/* 序号列窄、右对齐；路径列吃掉剩余宽度，太长时省略号，鼠标悬停看完整路径。 */
+.ws-table th.ws-col-idx,.ws-table td.ws-col-idx{width:40px;text-align:right;color:#8B8E94}
+/* 路径要能看全：不省略、允许在分隔符处换行，长路径自然折成两行。 */
+.ws-table td.ws-path{white-space:normal;word-break:break-all;min-width:240px;color:#C9CBCF}
 .ws-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#A0A2A6}
 .ws-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0 12px}
 .ws-input,.ws-select{background:#1C1D1F;border:1px solid #2A2C2E;border-radius:6px;
@@ -242,6 +247,39 @@ window.__ModuleLoader__.load({
       return String(server ?? '')
         .replace(/^wss?:\/\//, '')
         .replace(/\/ws$/, '')
+    }
+
+    const DEFAULT_SYNC_PORT = 8443
+
+    /**
+     * 界面只让用户填 IP 或 IP:端口，协议头 / 路径 / 默认端口都在这里补。
+     * 已经写了 ws:// 或 wss:// 的完整地址原样保留——老配置和反代部署不受影响。
+     */
+    function normalizeServer(raw) {
+      const text = String(raw ?? '').trim()
+      if (!text) return ''
+      const scheme = /^(wss?):\/\//i.exec(text)
+      const rest = scheme ? text.slice(scheme[0].length) : text
+      const [authority, ...tail] = rest.replace(/^\/+/, '').split('/')
+      if (!authority) return ''
+      const host = /:\d+$/.test(authority) ? authority : `${authority}:${DEFAULT_SYNC_PORT}`
+      const path = tail.length > 0 ? `/${tail.join('/')}` : '/ws'
+      return `${scheme ? scheme[1].toLowerCase() : 'ws'}://${host}${path}`
+    }
+
+    /** 记录页把相对路径拼回磁盘绝对路径（任务目录 + 相对路径），分隔符统一成反斜杠。 */
+    function fullPath(root, rel) {
+      // 任务目录可能是正斜杠（API 建的任务）也可能是反斜杠（界面填的），先统一成反斜杠。
+      let base = String(root ?? '').trim().replace(/\//g, '\\').replace(/\\+$/, '')
+      if (base.startsWith('\\\\')) {
+        // UNC 路径（双反斜杠开头）要保留开头这两个反斜杠，不能压成一个。
+        base = `\\\\${base.slice(2).replace(/\\{2,}/g, '\\')}`
+      } else {
+        base = base.replace(/\\{2,}/g, '\\')
+      }
+      const tail = String(rel ?? '').replace(/^[\\/]+/, '').replace(/\//g, '\\')
+      if (!base) return tail
+      return tail ? `${base}\\${tail}` : base
     }
     function statusOf(task) {
       const rt = task.runtime ?? {}
@@ -676,6 +714,14 @@ window.__ModuleLoader__.load({
       const [rows, setRows] = React.useState([])
       const [loading, setLoading] = React.useState(false)
       const notify = store.notify
+      // 记录里只有相对路径，展示时拼回磁盘绝对路径；名字重复时取第一个任务即可。
+      const roots = React.useMemo(() => {
+        const map = new Map()
+        for (const item of tasks) {
+          if (!map.has(item.display_name)) map.set(item.display_name, item.root)
+        }
+        return map
+      }, [tasks])
 
       const load = React.useCallback(async () => {
         setLoading(true)
@@ -758,21 +804,23 @@ window.__ModuleLoader__.load({
                 h(
                   'tr',
                   null,
-                  ['时间', '任务', '文件', '动作', '状态', '说明'].map((label) =>
-                    h('th', { key: label }, label),
+                  ['#', '时间', '任务', '文件（完整路径）', '动作', '状态', '说明'].map((label) =>
+                    h('th', { key: label, className: label === '#' ? 'ws-col-idx' : undefined }, label),
                   ),
                 ),
               ),
               h(
                 'tbody',
                 null,
-                rows.map((row, index) =>
-                  h(
+                rows.map((row, index) => {
+                  const diskPath = fullPath(roots.get(row.task), row.path)
+                  return h(
                     'tr',
                     { key: `${row.created_at}-${index}` },
+                    h('td', { className: 'ws-mono ws-col-idx' }, String(index + 1)),
                     h('td', { className: 'ws-mono' }, fmtFull(row.created_at)),
                     h('td', null, row.task),
-                    h('td', { className: 'ws-mono', title: row.path }, row.path),
+                    h('td', { className: 'ws-mono ws-path', title: diskPath }, diskPath),
                     h('td', null, row.action),
                     h(
                       'td',
@@ -780,8 +828,8 @@ window.__ModuleLoader__.load({
                       row.ok ? '成功' : '失败',
                     ),
                     h('td', { title: row.message }, row.message),
-                  ),
-                ),
+                  )
+                }),
               ),
             ),
       )
@@ -965,7 +1013,8 @@ window.__ModuleLoader__.load({
     function TaskEditor({ task, onClose, store }) {
       const [form, setForm] = React.useState({
         name: task.name,
-        server: task.server,
+        // 输入框里只显示 host:port，用户不用面对 ws://…/ws 这种写法
+        server: shortServer(task.server),
         token: '',
         workspace: task.workspace,
         root: task.root,
@@ -979,7 +1028,7 @@ window.__ModuleLoader__.load({
 
       const body = (force) => ({
         name: form.name,
-        server: form.server,
+        server: normalizeServer(form.server),
         token: form.token,
         workspace: form.workspace,
         root: form.root,
@@ -1048,7 +1097,10 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'ws-modal-body' },
             input('任务名称', 'name', { placeholder: '留空则用目录名' }),
-            input('服务器地址', 'server', { placeholder: 'ws://192.168.3.222:18443/ws' }),
+            input('服务器地址', 'server', {
+              placeholder: '192.168.3.222 或 192.168.3.222:18443',
+              hint: `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}`,
+            }),
             input('密钥', 'token', {
               type: 'password',
               placeholder: task.has_token ? '已设置（留空表示不修改）' : '未设置',
@@ -1115,7 +1167,7 @@ window.__ModuleLoader__.load({
       const [step, setStep] = React.useState(0)
       const [busy, setBusy] = React.useState(false)
       const [form, setForm] = React.useState({
-        server: 'ws://127.0.0.1:18443/ws',
+        server: '',
         token: '',
         workspace: 'default',
         root: '',
@@ -1126,7 +1178,10 @@ window.__ModuleLoader__.load({
       })
 
       const issues = []
-      if (!/^wss?:\/\//.test(form.server.trim())) issues.push('服务器地址要以 ws:// 或 wss:// 开头')
+      // 只校验「补全之后」是不是一个合法地址，用户不需要关心 ws:// 和 /ws。
+      if (!/^wss?:\/\/[^\s/]+/.test(normalizeServer(form.server))) {
+        issues.push('只填服务器 IP 或 IP:端口即可')
+      }
       if (!form.token.trim()) issues.push('未填写密钥')
       if (!form.workspace.trim()) issues.push('未填写房间名')
       if (step >= 1) {
@@ -1145,7 +1200,7 @@ window.__ModuleLoader__.load({
                 method: 'POST',
                 body: {
                   name: form.name,
-                  server: form.server,
+                  server: normalizeServer(form.server),
                   token: form.token,
                   workspace: form.workspace,
                   root: form.root,
@@ -1195,9 +1250,14 @@ window.__ModuleLoader__.load({
               h('input', {
                 className: 'ws-input',
                 value: form.server,
+                placeholder: '192.168.3.222 或 192.168.3.222:18443',
                 onChange: (e) => setForm({ ...form, server: e.target.value }),
               }),
-              h('div', { className: 'ws-hint' }, '中继地址，通常以 /ws 结尾'),
+              h(
+                'div',
+                { className: 'ws-hint' },
+                `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}；协议头与 /ws 会自动补上`,
+              ),
             ),
             h(
               'div',
@@ -1387,7 +1447,7 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------ App */
 
-    function WinsyncApp({ onBack }) {
+    function WinsyncApp() {
       ensureStyles()
       const store = useStore()
       const [tab, setTab] = React.useState('tasks')
@@ -1417,24 +1477,13 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'ws-brand' },
-            h('div', { className: 'ws-mark' }, 'W'),
+            h('div', { className: 'ws-mark' }, h(WinsyncIcon, { size: 18 })),
             h('div', { className: 'ws-brand-name' }, 'WinSync'),
           ),
           h('nav', { className: 'ws-nav' }, nav('tasks', '同步任务'), nav('logs', '同步日志'), nav('settings', '设置')),
           h(
             'div',
             { className: 'ws-side-foot' },
-            typeof onBack === 'function'
-              ? h(
-                  'button',
-                  {
-                    className: 'ws-nav-item ws-back',
-                    title: '回到 dsh 对话',
-                    onClick: onBack,
-                  },
-                  '← 返回 dsh',
-                )
-              : null,
             h('button', { className: 'ws-nav-item', onClick: () => setWizard(true) }, '+ 创建同步任务'),
           ),
         ),
@@ -1491,7 +1540,7 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------ 注册 */
 
     function WinsyncIcon({ size }) {
-      const edge = typeof size === 'number' && size > 0 ? size : 16
+      const edge = typeof size === 'number' && size > 0 ? size : 18
       return h(
         'svg',
         {
@@ -1514,24 +1563,15 @@ window.__ModuleLoader__.load({
 
     return {
       name: 'dsh-winsync',
-      inject: ['slots', 'layout'],
+      inject: ['slots'],
       apply(ctx) {
-        // 返回对话：layout.selectPanel(null) 让主区交还给会话（与点左侧栏会话一致）。
-        const back = () => {
-          try {
-            ctx.layout?.selectPanel(null)
-          } catch {
-            /* 宿主版本没有 layout 服务时只是留在本页 */
-          }
-        }
         ctx.slots.inject('main', () =>
-          ctx.slots.register({ name: 'main', key: PANEL_ID }, () =>
-            h(WinsyncApp, { onBack: back }),
-          ),
+          ctx.slots.register({ name: 'main', key: PANEL_ID }, WinsyncApp),
         )
         ctx.slots.inject('sidebar.panellist', () =>
           ctx.slots.register(
-            { name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => '同步' },
+            // 菜单名说清楚「这是文件同步」，别和 dsh 自己的「同步」概念混淆。
+            { name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => '文件同步' },
             WinsyncIcon,
           ),
         )

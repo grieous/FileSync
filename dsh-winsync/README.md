@@ -65,8 +65,16 @@ dsh plugin --profile desktop install --force
 响应式用容器查询，因为面板宽度取决于 dsh 的分栏而不是视口：> 820px 三列，≤ 820px 两列，
 ≤ 640px 单列且侧栏收窄到 132px。
 
-面板只占 dsh 主区那一格：dsh 的左侧栏、Windows 标题栏和菜单始终露在外面；面板左下角的
-**`← 返回 dsh`** 调 `ctx.layout.selectPanel(null)`，把主区交还给当前会话（点 dsh 侧栏里的会话也一样）。
+面板只占 dsh 主区那一格：dsh 的左侧栏、Windows 标题栏和菜单始终露在外面，离开就点 dsh 侧栏里的会话
+（面板内不再放「返回 dsh」，那类按钮在多面板宿主里是多余的）。
+
+几个界面约定：
+
+- 左栏入口叫 **「文件同步」**，避免和 dsh 自己的「同步」概念混淆；入口图标是 18px 线条字形，跟随侧栏
+  `currentColor`，不画品牌色底块；
+- **服务器地址只填 IP 或 IP:端口**（如 `192.168.3.222` 或 `192.168.3.222:18443`），协议头、`/ws`
+  和不填端口时的默认 8443 自动补全；输入框里也只回显 `host:port`，老配置里的完整 `ws://…/ws` 照样接受；
+- 同步日志表格带 **序号**，文件列显示**磁盘绝对路径**（任务目录 + 相对路径），长路径换行不省略。
 
 **与 exe 的差异**：浏览器拿不到系统的目录选择框（`<input type="file" webkitdirectory>` 只给相对路径），
 所以创建向导第二步是**粘贴绝对路径**，hint 里写明了原因。
@@ -116,7 +124,7 @@ dsh plugin --profile desktop install --force
 | 面板打开是「同步服务不可用」 | 面板「设置 → 诊断」里的 `daemon` 段；`%LOCALAPPDATA%\dsh-winsync\daemon.json` 是否存在 | 点「重试」；仍失败就看 daemon 日志（`<state>\logs\`） |
 | 提示 `daemon-missing` | `<state>\bin\winsync-daemon.exe`、`Program Files\WinSync\`、`PATH` | `cargo build -p sync-daemon --release` 后把 exe 放进 `<state>\bin\`，或在设置里填绝对路径 |
 | 改了界面却不生效 | 是不是只 `pnpm install` 没重启 dsh | 客户端 bundle 在页面加载时注入，**必须重启 dsh**；重装前记得删旧的 `node_modules/dsh-winsync`（pnpm 会硬链旧快照） |
-| 进了同步页退不出来 | 左下角 `← 返回 dsh`；或直接点 dsh 侧栏里的会话 | 两者都调 `layout.selectPanel(null)`；宿主版本太旧没有 `layout` 服务时按钮不渲染 |
+| 进了同步页退不出来 | 点 dsh 左侧栏里的任意会话，或按 `Ctrl+B` 收起/展开侧栏 | 主区槽由宿主 `layout.selectPanel(null)` 接管；插件不再自带返回按钮 |
 | 同步「看着很慢」 | 设置里的限速是不是非 0 | 1.5 MB @ 256 KB/s 实测 6.6 秒。旧版本把 KB/s 当 kbit/s，慢 8 倍，见 `sync/README.md` |
 | 报 `Connection reset without closing handshake` | 房间是不是已经满了（一个房间最多 2 端） | 中继发完 `Bye` 立刻断 socket，客户端只看得到协议错误。先确认没有第二个进程/任务连同一个房间；对端残留的旧会话要重启 exe 才会断 |
 

@@ -44,17 +44,11 @@ const clientPlugin = captured.factory((specifier) => {
   throw new Error(`bundle requested a non-baseline module: ${specifier}`)
 })
 assert.equal(clientPlugin.name, 'dsh-winsync')
-// layout 是「返回对话」用的宿主服务：面板必须能自己交还主区。
-assert.deepEqual(clientPlugin.inject, ['slots', 'layout'])
+// 面板不再自带「返回 dsh」按钮，只依赖 slots（宿主左侧栏点会话即可离开）。
+assert.deepEqual(clientPlugin.inject, ['slots'])
 
 const registrations = []
-const selected = []
 clientPlugin.apply({
-  layout: {
-    selectPanel(panelId) {
-      selected.push(panelId)
-    },
-  },
   slots: {
     inject(key, callback) {
       registrations.push({ kind: 'inject', key })
@@ -79,7 +73,7 @@ const row = entries.find((r) => r.options.name === 'sidebar.panellist')
 assert.equal(row?.options.id, 'winsync', 'sidebar row id addresses the main panel')
 assert.equal(row?.options.order, 10)
 assert.equal(typeof row?.options.label, 'function')
-assert.equal(row.options.label(), '同步')
+assert.equal(row.options.label(), '文件同步')
 assert.equal(typeof row.component, 'function')
 
 // Both components must survive a bare call: the panel shell renders, and the
@@ -87,14 +81,12 @@ assert.equal(typeof row.component, 'function')
 const tree = page.component({})
 assert.ok(tree && typeof tree === 'object', 'WinsyncPage returned nothing')
 
-// 主区面板接管了整块画布，必须自带出口：onBack 交还布局给会话。
-assert.equal(typeof tree.props?.onBack, 'function', 'panel shell must expose a way back to dsh')
-tree.props.onBack()
-assert.deepEqual(selected, [null], 'back must clear the active panel (null = conversation)')
-
 const glyph = row.component({ size: 20, active: false })
 assert.equal(glyph.type, 'svg')
 assert.equal(glyph.props.width, 20)
 assert.equal(glyph.props.height, 20)
+assert.equal(glyph.props.stroke, 'currentColor', 'icon must inherit sidebar color, not a hard-coded blue')
+const fallback = row.component({})
+assert.equal(fallback.props.width, 18, 'default icon size matches dsh sidebar icons')
 
 console.log("client smoke: 注册契约通过")
