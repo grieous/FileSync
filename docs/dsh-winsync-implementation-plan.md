@@ -593,6 +593,32 @@ P3 期间对宿主半的两处增补：
 - 宿主被硬杀后 `daemon.json` 残留 → 下次 `ensure()` 按 pid 判活回收，日志实证
   `[ensure] 丢弃陈旧握手（pid=45412 已退出）`。
 
+### P3 界面遮挡修复（2026-11-22）
+
+桌面端截图暴露出一个比配色严重得多的问题：**面板整块盖住了 dsh 自己的界面**。左侧 dsh 侧栏、
+Windows 标题栏（「应用 / 编辑」菜单、最小化/关闭按钮）全被压住，进去以后没有出口。
+
+根因在 `.ws-root` 的定位方式。原样式是 `position:absolute; inset:0`，而宿主 `.mainPanel` 是
+`position:static`，于是包含块一路回溯到 `.frame`（`position:relative`）：
+
+- 横向：铺满整个 frame，连 280px 的 dsh 侧栏一起盖掉；
+- 纵向：`.frame` 在 Windows 上只靠 `padding-top: var(--dsh-windows-titlebar-height)` 让出标题栏，
+  而绝对定位元素贴的是 **padding box** 的内边缘——`top:0` 正好落在标题栏里。
+
+修法是放弃绝对定位，按宿主给的盒子排版：
+
+| 改动 | 说明 |
+|---|---|
+| `.ws-root` 改 `position:relative; flex:1 1 auto; min-height:0; height:100%` | 宿主 `main` 槽外面是 `display:contents` 的包装，面板直接成为 `.mainPanel`（flex column）的子项，自动落在标题栏之下、侧栏之右 |
+| 面板内 `← 返回 dsh` | `inject` 增加 `layout`，调 `ctx.layout.selectPanel(null)` 把主区交还给会话；宿主没有该服务时按钮不渲染 |
+| `client-smoke` 补两条断言 | `inject` 必须含 `layout`；面板壳必须暴露 `onBack`，且调用后 `selectPanel(null)` |
+
+实测（1440×960 的真实页面）：面板矩形从 `0,0,1406×863` 变成 `280,0,1126×863`——正好是
+`.mainPanel` 的盒子；点「返回」后 `.ws-root` 消失、会话输入框回来。
+
+> 教训：插件挂在 `main` 槽时**不要用 `position:absolute; inset:0` 撑满**。宿主只保证槽内容落在
+> 主区那一格里，绝对定位会被最近的 positioned 祖先（`.frame`）接管，把别人的界面吃掉。
+
 ### P3 界面细节调整（2026-11-22，提交 `a2c11a7`）
 
 P3 交付时的界面只在空态和单任务上验证过。这次灌了 5 个真实任务（正常 / 仅上传暂停 /

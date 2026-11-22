@@ -22,7 +22,13 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------ 样式 */
 
     const CSS = `
-.ws-root{position:absolute;inset:0;display:flex;background:#0E0F10;color:#EDEDEE;
+/* 主区面板只能占 dsh 给它的那一格：不能用 absolute/inset:0——那会以 .frame
+   为包含块，连左侧栏和 Windows 标题栏一起盖住（宿主 .frame 只靠 padding-top
+   让出标题栏，absolute 元素贴的是 padding box 边缘，正好压上去）。宿主把
+   main 槽塞在 display:contents 的包装里，所以这里直接作为 .mainPanel 的
+   flex 子项撑满即可。 */
+.ws-root{position:relative;flex:1 1 auto;min-width:0;min-height:0;height:100%;
+  box-sizing:border-box;display:flex;background:#0E0F10;color:#EDEDEE;
   font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","Microsoft YaHei",sans-serif;overflow:hidden;
   container-type:inline-size}
 .ws-side{width:180px;flex:0 0 180px;background:#161719;border-right:1px solid #2A2C2E;
@@ -40,7 +46,9 @@ window.__ModuleLoader__.load({
 .ws-nav-item:focus,.ws-btn:focus,.ws-icon-btn:focus{outline:none}
 .ws-nav-item:focus-visible,.ws-btn:focus-visible,.ws-icon-btn:focus-visible{
   outline:2px solid #2B6CF6;outline-offset:1px}
-.ws-side-foot{margin-top:auto;padding-top:8px}
+.ws-side-foot{margin-top:auto;padding-top:10px;border-top:1px solid #24262A}
+.ws-back{color:#8B8E94;font-size:12px;margin-bottom:2px}
+.ws-back:hover{color:#EDEDEE}
 .ws-content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .ws-scroll{overflow:auto;padding:18px 24px 32px;flex:1}
 .ws-scroll::-webkit-scrollbar,.ws-raw-body::-webkit-scrollbar{width:8px;height:8px}
@@ -1379,7 +1387,7 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------ App */
 
-    function WinsyncApp() {
+    function WinsyncApp({ onBack }) {
       ensureStyles()
       const store = useStore()
       const [tab, setTab] = React.useState('tasks')
@@ -1416,6 +1424,17 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'ws-side-foot' },
+            typeof onBack === 'function'
+              ? h(
+                  'button',
+                  {
+                    className: 'ws-nav-item ws-back',
+                    title: '回到 dsh 对话',
+                    onClick: onBack,
+                  },
+                  '← 返回 dsh',
+                )
+              : null,
             h('button', { className: 'ws-nav-item', onClick: () => setWizard(true) }, '+ 创建同步任务'),
           ),
         ),
@@ -1495,10 +1514,20 @@ window.__ModuleLoader__.load({
 
     return {
       name: 'dsh-winsync',
-      inject: ['slots'],
+      inject: ['slots', 'layout'],
       apply(ctx) {
+        // 返回对话：layout.selectPanel(null) 让主区交还给会话（与点左侧栏会话一致）。
+        const back = () => {
+          try {
+            ctx.layout?.selectPanel(null)
+          } catch {
+            /* 宿主版本没有 layout 服务时只是留在本页 */
+          }
+        }
         ctx.slots.inject('main', () =>
-          ctx.slots.register({ name: 'main', key: PANEL_ID }, WinsyncApp),
+          ctx.slots.register({ name: 'main', key: PANEL_ID }, () =>
+            h(WinsyncApp, { onBack: back }),
+          ),
         )
         ctx.slots.inject('sidebar.panellist', () =>
           ctx.slots.register(

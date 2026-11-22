@@ -65,6 +65,9 @@ dsh plugin --profile desktop install --force
 响应式用容器查询，因为面板宽度取决于 dsh 的分栏而不是视口：> 820px 三列，≤ 820px 两列，
 ≤ 640px 单列且侧栏收窄到 132px。
 
+面板只占 dsh 主区那一格：dsh 的左侧栏、Windows 标题栏和菜单始终露在外面；面板左下角的
+**`← 返回 dsh`** 调 `ctx.layout.selectPanel(null)`，把主区交还给当前会话（点 dsh 侧栏里的会话也一样）。
+
 **与 exe 的差异**：浏览器拿不到系统的目录选择框（`<input type="file" webkitdirectory>` 只给相对路径），
 所以创建向导第二步是**粘贴绝对路径**，hint 里写明了原因。
 

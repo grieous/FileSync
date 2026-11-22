@@ -44,10 +44,17 @@ const clientPlugin = captured.factory((specifier) => {
   throw new Error(`bundle requested a non-baseline module: ${specifier}`)
 })
 assert.equal(clientPlugin.name, 'dsh-winsync')
-assert.deepEqual(clientPlugin.inject, ['slots'])
+// layout 是「返回对话」用的宿主服务：面板必须能自己交还主区。
+assert.deepEqual(clientPlugin.inject, ['slots', 'layout'])
 
 const registrations = []
+const selected = []
 clientPlugin.apply({
+  layout: {
+    selectPanel(panelId) {
+      selected.push(panelId)
+    },
+  },
   slots: {
     inject(key, callback) {
       registrations.push({ kind: 'inject', key })
@@ -79,6 +86,12 @@ assert.equal(typeof row.component, 'function')
 // sidebar glyph draws at the size the sidebar passes (hooks are no-ops here).
 const tree = page.component({})
 assert.ok(tree && typeof tree === 'object', 'WinsyncPage returned nothing')
+
+// 主区面板接管了整块画布，必须自带出口：onBack 交还布局给会话。
+assert.equal(typeof tree.props?.onBack, 'function', 'panel shell must expose a way back to dsh')
+tree.props.onBack()
+assert.deepEqual(selected, [null], 'back must clear the active panel (null = conversation)')
+
 const glyph = row.component({ size: 20, active: false })
 assert.equal(glyph.type, 'svg')
 assert.equal(glyph.props.width, 20)
