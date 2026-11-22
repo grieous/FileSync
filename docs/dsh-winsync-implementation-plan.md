@@ -688,6 +688,27 @@ E2E_VERBOSE=1 node sync/tools/e2e.mjs   # 打印每轮同步的完整输出
 | `rate-limit` | 256 KB/s 传 1.5 MB = 6.6s（理论 6.1s）；解除后 0.26s | 8/8 |
 | `isolation` | 同目录/父目录 → 409 `root-conflict`；exe 的 config 内容与 mtime 都不动 | 9/9 |
 
+#### 跨机实测：本机 dsh 插件 ⇄ 对端 WinSync.exe（2026-11-22）
+
+真机两台：本机 `192.168.3.203`（dsh 插件，目录 `C:\Users\gjn86\dsh-verify-clean`）⇄
+对端 `192.168.3.42`（WinSync.exe，目录 `sync-dsh`），中继 `ws://192.168.3.222:18443/ws`、
+房间 `default`、双向。两端都是**专用目录**，不碰任何真实文件。
+
+| 验证点 | 证据（`/api/export.csv` 文件级记录） |
+|---|---|
+| 插件 → exe：建目录 + 3 个文件 | 12:11:13 `docs` 建目录成功；12:11:14 `hello-from-plugin.txt`、`docs/说明.md`、`docs/data.bin` 上传成功 |
+| 幂等：确认后零传输 | 紧接着一轮 `两端内容一致，无需同步` |
+| exe → 插件：新增文件被拉回 | 12:12:18 `111.txt` 下载成功，落盘到本机专用目录 |
+| 删除传播 | 12:13:05 本机删除 `111.txt` → 记录 `删除对端 / 成功 / 本机已删除` |
+| 设备身份隔离 | 对端 device_id `304aedff`，与本机不同；两端各写各的状态库 |
+
+踩到的坑：**同一房间最多 2 个连接**。对端删掉旧任务后，旧会话的 WS 仍挂在中继上，
+新的连接就会在握手阶段被拒（客户端只看到
+`WebSocket protocol error: Connection reset without closing handshake`，
+因为中继发完 `Bye` 立刻断 socket）。两种处理：重启对端 exe 清掉残留；或换一个房间号绕开。
+排查思路：先看本机到中继的连接数（`Get-NetTCPConnection -RemotePort 18443`），
+再用一个空房间连同一个中继——空房间能进、`default` 进不去，就说明是对端占满了。
+
 #### 联调抓到的真问题
 
 **限速单位算错了 8 倍。** `throttle()` 里写的是 `bytes * 8 / (kbps * 1024)`，

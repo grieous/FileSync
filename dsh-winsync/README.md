@@ -118,6 +118,7 @@ dsh plugin --profile desktop install --force
 | 改了界面却不生效 | 是不是只 `pnpm install` 没重启 dsh | 客户端 bundle 在页面加载时注入，**必须重启 dsh**；重装前记得删旧的 `node_modules/dsh-winsync`（pnpm 会硬链旧快照） |
 | 进了同步页退不出来 | 左下角 `← 返回 dsh`；或直接点 dsh 侧栏里的会话 | 两者都调 `layout.selectPanel(null)`；宿主版本太旧没有 `layout` 服务时按钮不渲染 |
 | 同步「看着很慢」 | 设置里的限速是不是非 0 | 1.5 MB @ 256 KB/s 实测 6.6 秒。旧版本把 KB/s 当 kbit/s，慢 8 倍，见 `sync/README.md` |
+| 报 `Connection reset without closing handshake` | 房间是不是已经满了（一个房间最多 2 端） | 中继发完 `Bye` 立刻断 socket，客户端只看得到协议错误。先确认没有第二个进程/任务连同一个房间；对端残留的旧会话要重启 exe 才会断 |
 
 ## 测试
 
