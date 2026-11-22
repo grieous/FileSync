@@ -43,10 +43,16 @@ window.__ModuleLoader__.load({
 .ws-side-foot{margin-top:auto;padding-top:8px}
 .ws-content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .ws-scroll{overflow:auto;padding:18px 24px 32px;flex:1}
+.ws-scroll::-webkit-scrollbar,.ws-raw-body::-webkit-scrollbar{width:8px;height:8px}
+.ws-scroll::-webkit-scrollbar-thumb,.ws-raw-body::-webkit-scrollbar-thumb{
+  background:#2A2C2E;border-radius:4px}
+.ws-scroll::-webkit-scrollbar-thumb:hover,.ws-raw-body::-webkit-scrollbar-thumb:hover{
+  background:#3A3D41}
+.ws-scroll::-webkit-scrollbar-track,.ws-raw-body::-webkit-scrollbar-track{background:transparent}
 .ws-row{display:flex;align-items:center;gap:10px}
 .ws-page-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
 .ws-title{font-size:18px;font-weight:600;margin:0}
-.ws-sub{color:#6E7176;font-size:12px}
+.ws-sub{color:#8B8E94;font-size:12px}
 .ws-device{color:#A0A2A6;font-size:12px;margin:8px 0 14px}
 .ws-btn{appearance:none;border:1px solid #2A2C2E;background:#232427;color:#EDEDEE;
   border-radius:6px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}
@@ -61,7 +67,7 @@ window.__ModuleLoader__.load({
   margin-bottom:12px}
 .ws-card[data-selected="true"]{border-color:#2B6CF6}
 .ws-card-head{display:flex;align-items:flex-start;gap:10px}
-.ws-folder{width:30px;height:30px;border-radius:8px;background:#232427;color:#A0A2A6;
+.ws-folder{width:30px;height:30px;border-radius:8px;background:#26282B;color:#B9BBBF;
   display:flex;align-items:center;justify-content:center;flex:0 0 30px}
 .ws-task-name{font-size:15px;font-weight:600}
 .ws-task-state{font-size:12px}
@@ -80,39 +86,50 @@ window.__ModuleLoader__.load({
 .ws-progress>i{display:block;height:100%;background:#2B6CF6;transition:width .2s}
 .ws-info{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px;
   padding-top:12px;border-top:1px solid #2A2C2E}
-.ws-info dt{color:#6E7176;font-size:11px;margin:0 0 2px}
+.ws-info dt{color:#8B8E94;font-size:11px;margin:0 0 3px}
 .ws-info dd{margin:0;font-size:12px;color:#EDEDEE;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap}
 .ws-task-foot{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
 .ws-issues{margin-top:8px;color:#F0554D;font-size:12px}
-.ws-empty{padding:48px 10px;text-align:center;color:#6E7176}
+.ws-empty{padding:48px 10px;text-align:center;color:#8B8E94}
 .ws-empty strong{display:block;color:#EDEDEE;font-size:14px;font-weight:500;margin-bottom:6px}
 .ws-table{width:100%;border-collapse:collapse;font-size:12px}
-.ws-table th{text-align:left;color:#6E7176;font-weight:400;padding:6px 8px;
+.ws-table th{text-align:left;color:#8B8E94;font-weight:500;padding:7px 8px;letter-spacing:.02em;
   border-bottom:1px solid #2A2C2E;position:sticky;top:0;background:#0E0F10}
-.ws-table td{padding:6px 8px;border-bottom:1px solid #1F2124;vertical-align:top}
+.ws-table td{padding:7px 8px;border-bottom:1px solid #202225;vertical-align:top}
+.ws-table tbody tr:hover{background:#1A1B1D}
 .ws-table tbody tr:nth-child(even){background:#121315}
+.ws-table tbody tr:nth-child(even):hover{background:#1A1B1D}
+.ws-table tbody tr:last-child td{border-bottom:0}
 .ws-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#A0A2A6}
 .ws-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0 12px}
 .ws-input,.ws-select{background:#1C1D1F;border:1px solid #2A2C2E;border-radius:6px;
   color:#EDEDEE;font:inherit;font-size:12px;padding:5px 8px;min-width:0}
 .ws-input:focus,.ws-select:focus{outline:none;border-color:#2B6CF6}
-.ws-field{margin-bottom:12px}
+.ws-field{margin-bottom:10px}
 .ws-field label{display:block;color:#A0A2A6;font-size:12px;margin-bottom:4px}
-.ws-field .ws-input,.ws-field .ws-select{width:100%;box-sizing:border-box;padding:7px 9px}
+.ws-field .ws-input,.ws-field .ws-select{width:100%;box-sizing:border-box;padding:6px 9px;height:32px}
 .ws-field .ws-num{max-width:180px}
-.ws-field .ws-hint{color:#6E7176;font-size:11px;margin-top:4px}
+.ws-field .ws-hint{color:#8B8E94;font-size:11px;margin-top:4px}
 .ws-overlay{position:absolute;inset:0;background:rgba(0,0,0,.55);display:flex;
   align-items:center;justify-content:center;z-index:40}
-.ws-modal{background:#161719;border:1px solid #2A2C2E;border-radius:12px;width:min(560px,92%);
-  max-height:86%;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.6)}
-.ws-modal-head{padding:14px 18px;border-bottom:1px solid #2A2C2E;font-size:15px;font-weight:600}
-.ws-modal-body{padding:16px 18px;overflow:auto}
+.ws-modal{background:#161719;border:1px solid #2A2C2E;border-radius:12px;width:min(620px,92%);
+  max-height:88%;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.6)}
+.ws-modal-head{padding:14px 18px;border-bottom:1px solid #2A2C2E;font-size:15px;font-weight:600;
+  flex:0 0 auto}
+/* min-height:0 是 flex 子项能真正滚动的关键，否则内容会把弹窗撑破 */
+.ws-modal-body{padding:14px 18px;overflow:auto;min-height:0;flex:1 1 auto}
+.ws-modal-body::-webkit-scrollbar{width:8px}
+.ws-modal-body::-webkit-scrollbar-thumb{background:#2A2C2E;border-radius:4px}
+.ws-modal-body::-webkit-scrollbar-thumb:hover{background:#3A3D41}
+.ws-modal-body::-webkit-scrollbar-track{background:transparent}
 .ws-modal-foot{padding:12px 18px;border-top:1px solid #2A2C2E;display:flex;
-  justify-content:flex-end;gap:8px}
+  justify-content:flex-end;gap:8px;flex:0 0 auto}
 .ws-steps{display:flex;gap:8px;margin-bottom:16px}
-.ws-step{flex:1;border-top:2px solid #2A2C2E;padding-top:6px;color:#6E7176;font-size:11px}
-.ws-step[data-on="true"]{border-color:#2B6CF6;color:#EDEDEE}
+.ws-step{flex:1;border-top:2px solid #2A2C2E;padding-top:6px;color:#6E7176;font-size:11px;
+  transition:border-color .15s,color .15s}
+.ws-step[data-state="done"]{border-color:#1E4FA8;color:#8B8E94}
+.ws-step[data-state="on"]{border-color:#2B6CF6;color:#EDEDEE;font-weight:600}
 .ws-toast{position:absolute;left:50%;transform:translateX(-50%);bottom:18px;z-index:60;
   background:#232427;border:1px solid #2A2C2E;border-radius:8px;padding:8px 14px;
   font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45);max-width:70%}
@@ -120,19 +137,28 @@ window.__ModuleLoader__.load({
 .ws-toast[data-tone="ok"]{border-color:#25503C;color:#9BE3BF}
 .ws-banner{padding:8px 12px;border-radius:8px;font-size:12px;
   background:#2A2318;border:1px solid #4A3A18;color:#E6A23C;display:flex;gap:10px;align-items:center}
-.ws-raw{position:absolute;right:16px;bottom:16px;width:min(520px,60%);max-height:46%;
+.ws-raw{position:absolute;right:16px;bottom:16px;width:min(680px,72%);max-height:56%;
   background:#161719;border:1px solid #2A2C2E;border-radius:10px;display:flex;
   flex-direction:column;z-index:50;box-shadow:0 18px 40px rgba(0,0,0,.55)}
 .ws-raw-head{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;
   border-bottom:1px solid #2A2C2E;font-size:12px;color:#A0A2A6}
 .ws-raw-body{overflow:auto;padding:8px 12px;font-family:ui-monospace,Consolas,monospace;
-  font-size:11px;color:#A0A2A6;white-space:pre-wrap;word-break:break-all}
+  font-size:11.5px;line-height:1.65;color:#A0A2A6;white-space:pre-wrap;word-break:break-all}
 .ws-link{color:#5B92FF;cursor:pointer;background:none;border:0;font:inherit;padding:0}
+/* 开关：比原生复选框更像「设置项」，也和卡片里的圆钮风格统一 */
+.ws-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;color:#A0A2A6;font-size:12px}
+.ws-switch input{appearance:none;-webkit-appearance:none;width:32px;height:18px;border-radius:9px;
+  background:#2A2C2E;position:relative;margin:0;cursor:pointer;transition:background .15s}
+.ws-switch input:checked{background:#2B6CF6}
+.ws-switch input::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;
+  border-radius:50%;background:#EDEDEE;transition:transform .15s}
+.ws-switch input:checked::after{transform:translateX(14px)}
+.ws-switch:hover{color:#EDEDEE}
 
 /* 面板宽度取决于 dsh 的分栏，不跟视口走，所以用容器查询而不是媒体查询 */
 @container (max-width: 820px){
   .ws-info{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .ws-raw{width:min(520px,84%)}
+  .ws-raw{width:min(680px,86%)}
 }
 @container (max-width: 640px){
   .ws-side{width:132px;flex-basis:132px;padding:12px 8px 10px}
@@ -211,11 +237,29 @@ window.__ModuleLoader__.load({
     }
     function statusOf(task) {
       const rt = task.runtime ?? {}
-      if (rt.running) return { text: '同步中…', tone: '#E6A23C' }
+      // running 与 last_error 会同时存在（上一轮失败、这一轮还在等对端），
+      // 这时说「同步中」会让人以为错误已经好了，所以单独标成「重试中」。
+      if (rt.running) {
+        return rt.last_error
+          ? { text: '重试中…', tone: '#E6A23C' }
+          : { text: '同步中…', tone: '#E6A23C' }
+      }
       if (task.paused) return { text: '已暂停', tone: '#6E7176' }
       if (rt.last_error) return { text: '同步失败', tone: '#F0554D' }
       if (rt.last) return { text: rt.last.up_to_date ? '两端已一致' : '同步完成', tone: '#4CC38A' }
       return { text: '等待同步', tone: '#6E7176' }
+    }
+
+    /** 变更统计：全是 0 时不必把四个 0 都念一遍。 */
+    function changeSummary(last) {
+      if (!last) return null
+      const parts = []
+      if (last.pushed) parts.push(`推送 ${last.pushed}`)
+      if (last.pulled) parts.push(`拉取 ${last.pulled}`)
+      if (last.deleted) parts.push(`删除 ${last.deleted}`)
+      if (last.conflicts) parts.push(`冲突 ${last.conflicts}`)
+      if (parts.length === 0) return last.up_to_date ? '无变更' : '无传输'
+      return parts.join(' · ')
     }
 
     /* ------------------------------------------------------------ store */
@@ -360,7 +404,7 @@ window.__ModuleLoader__.load({
     const IconFolder = () =>
       h(
         'svg',
-        { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'currentColor', 'aria-hidden': 'true' },
+        { width: 18, height: 18, viewBox: '0 0 16 16', fill: 'currentColor', 'aria-hidden': 'true' },
         h('path', {
           d: 'M2 4.2c0-.6.5-1 1-1h3l1.2 1.3H13c.6 0 1 .4 1 1v6.3c0 .6-.4 1-1 1H3c-.5 0-1-.4-1-1V4.2Z',
         }),
@@ -369,7 +413,7 @@ window.__ModuleLoader__.load({
     const IconPause = () =>
       h(
         'svg',
-        { width: 11, height: 11, viewBox: '0 0 12 12', fill: 'currentColor', 'aria-hidden': 'true' },
+        { width: 12, height: 12, viewBox: '0 0 12 12', fill: 'currentColor', 'aria-hidden': 'true' },
         h('rect', { x: 2.4, y: 1.8, width: 2.6, height: 8.4, rx: 1 }),
         h('rect', { x: 7, y: 1.8, width: 2.6, height: 8.4, rx: 1 }),
       )
@@ -377,7 +421,7 @@ window.__ModuleLoader__.load({
     const IconPlay = () =>
       h(
         'svg',
-        { width: 11, height: 11, viewBox: '0 0 12 12', fill: 'currentColor', 'aria-hidden': 'true' },
+        { width: 12, height: 12, viewBox: '0 0 12 12', fill: 'currentColor', 'aria-hidden': 'true' },
         h('path', { d: 'M3.6 2.1 9.6 6l-6 3.9V2.1Z' }),
       )
 
@@ -489,7 +533,8 @@ window.__ModuleLoader__.load({
           h(
             'button',
             {
-              className: 'ws-btn ws-btn-primary',
+              // 暂停的任务只是在停自动同步，手动同步是次要动作，不要抢主按钮的视觉权重
+              className: task.paused ? 'ws-btn' : 'ws-btn ws-btn-primary',
               disabled: !canSync,
               title: rt.running ? '正在同步' : (task.issues ?? []).length > 0 ? '先修正配置问题' : '',
               onClick: () => onSync(task),
@@ -504,15 +549,18 @@ window.__ModuleLoader__.load({
           rt.next_auto_in !== undefined && !task.paused
             ? h('span', { className: 'ws-sub' }, `· ${rt.next_auto_in}s 后自动`)
             : null,
-          rt.last
-            ? h(
-                'span',
-                { className: 'ws-sub' },
-                `· 推送 ${rt.last.pushed} 拉取 ${rt.last.pulled} 删除 ${rt.last.deleted} 冲突 ${rt.last.conflicts}`,
-              )
+          changeSummary(rt.last)
+            ? h('span', { className: 'ws-sub' }, `· ${changeSummary(rt.last)}`)
             : null,
         ),
-        rt.last_error ? h('div', { className: 'ws-issues' }, rt.last_error) : null,
+        rt.last_error
+          ? h(
+              'div',
+              { className: 'ws-issues' },
+              // 正在同步或已暂停时，这条是「上一轮」的结果；否则状态行已经说了「同步失败」
+              rt.running || task.paused ? `上次失败：${rt.last_error}` : rt.last_error,
+            )
+          : null,
       )
     }
 
@@ -521,7 +569,6 @@ window.__ModuleLoader__.load({
     function TasksPage({ store, onCreate, onEdit }) {
       const data = store.data
       const tasks = data?.tasks ?? []
-      const first = tasks[0]
 
       const sync = (task) =>
         store.run(
@@ -570,7 +617,7 @@ window.__ModuleLoader__.load({
             { className: 'ws-row' },
             h(
               'label',
-              { className: 'ws-sub', style: { display: 'flex', alignItems: 'center', gap: 6 } },
+              { className: 'ws-switch', title: '开启后按目录变更与固定间隔自动同步' },
               h('input', {
                 type: 'checkbox',
                 checked: data?.auto ?? true,
@@ -584,9 +631,10 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'ws-device' },
-          first
-            ? `🖥  ${data?.device ?? '本机'}  |  ${shortServer(first.server)}  ·  房间 ${first.workspace}`
-            : `🖥  ${data?.device ?? '本机'}`,
+          // 只报设备与任务数：房间是每个任务各自的，写在这里会被当成全局设置
+          tasks.length === 0
+            ? `🖥  ${data?.device ?? '本机'}`
+            : `🖥  ${data?.device ?? '本机'}  ·  ${tasks.length} 个任务`,
         ),
         tasks.length === 0
           ? h(
@@ -1121,7 +1169,7 @@ window.__ModuleLoader__.load({
         ['1 服务器', '2 本机目录', '3 确认'].map((label, index) =>
           h(
             'div',
-            { key: label, className: 'ws-step', 'data-on': index <= step ? 'true' : 'false' },
+            { key: label, className: 'ws-step', 'data-state': index < step ? 'done' : index === step ? 'on' : 'todo' },
             label,
           ),
         ),
@@ -1235,10 +1283,20 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'ws-card', style: { background: '#121315' } },
             h('div', { className: 'ws-sub', style: { marginBottom: 6 } }, '即将创建'),
+            // 分两行：目录一行、目标一行，避免长路径把「房间 xxx」挤到下一行只剩一个词
             h(
               'div',
-              null,
-              `${form.root || '（未填目录）'} ⇄ ${shortServer(form.server)} · 房间 ${form.workspace}`,
+              { style: { marginBottom: 4 } },
+              h(
+                'span',
+                { className: 'ws-mono', style: { wordBreak: 'break-all' } },
+                form.root || '（未填目录）',
+              ),
+            ),
+            h(
+              'div',
+              { className: 'ws-sub' },
+              `⇄  ${shortServer(form.server)}  ·  房间 ${form.workspace}`,
             ),
             issues.length > 0
               ? h(
