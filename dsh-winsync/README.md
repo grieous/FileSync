@@ -86,6 +86,18 @@ dsh plugin --profile desktop install --force
 **与 exe 的差异**：浏览器拿不到系统的目录选择框（`<input type="file" webkitdirectory>` 只给相对路径），
 所以创建向导第二步是**粘贴绝对路径**，hint 里写明了原因。
 
+## 打包
+
+改完插件代码后出一份 tgz（产物在仓库根目录，`dsh-winsync-<version>.tgz`）：
+
+```bash
+npm run pack:tgz
+```
+
+版本号按 patch 递增；安装到别的机器用 `dsh plugin --profile <名> add <tgz 路径>`。
+tgz 里**不含** daemon 二进制，`winsync-daemon.exe` 需要单独放到
+`%LOCALAPPDATA%\dsh-winsync\bin\`。
+
 ## 偏好
 
 `%LOCALAPPDATA%\dsh-winsync\plugin.json`（放在自己的树里，不碰 exe）：
