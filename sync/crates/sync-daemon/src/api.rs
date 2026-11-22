@@ -255,10 +255,30 @@ impl TaskInput {
     }
 }
 
+/// 同步目录不存在就建出来（含多级父目录）。
+///
+/// 界面允许直接填一个新路径，`Config::issues()` 里却有一项「目录必须存在」。
+/// 在调 `into_config()` 之前先落盘，两边就自洽了：用户不用再先开资源管理器建目录。
+/// 只在「新建/保存任务」这两个明确动作里调用——同步启动时**不**自动建，
+/// 免得盘符没挂上时把一个空目录当成真的，进而把「本地全没了」传播给对端。
+fn ensure_root_dir(root: &str) -> Result<(), ApiError> {
+    let path = root.trim();
+    if path.is_empty() {
+        return Ok(()); // 空路径交给 issues() 报「未选择同步目录」
+    }
+    let dir = std::path::Path::new(path);
+    if dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)
+        .map_err(|e| ApiError::bad(format!("无法创建同步目录 {path}：{e}")))
+}
+
 async fn create_task(
     State(state): State<Arc<AppState>>,
     Json(input): Json<TaskInput>,
 ) -> ApiResult {
+    ensure_root_dir(&input.root)?;
     let cfg = input.into_config()?;
     if let Err(message) = overlap::conflict_for(&cfg.root) {
         return Err(ApiError::conflict("root-conflict", message));
@@ -349,6 +369,7 @@ async fn patch_task(
             }
         }
 
+        ensure_root_dir(&cfg.root)?;
         let issues = cfg.issues();
         if !issues.is_empty() {
             return Err(ApiError::bad(issues.join("；")));
@@ -802,5 +823,26 @@ mod tests {
     #[test]
     fn timestamps_in_export_use_full_form() {
         assert_eq!(util::fmt_ts_full(0), "1970-01-01 08:00:00");
+    }
+
+    /// ApiError 没有 Debug，测试里不能 unwrap，手动断言。
+    fn ensure_ok(root: &str) {
+        if let Err(e) = ensure_root_dir(root) {
+            panic!("ensure_root_dir({root}) 失败：{}", e.message);
+        }
+    }
+
+    #[test]
+    fn ensure_root_dir_creates_nested_paths() {
+        let base = std::env::temp_dir().join("winsync-ensure-root");
+        let nested = base.join("a/b/c");
+        let _ = std::fs::remove_dir_all(&base);
+        ensure_ok(nested.to_str().unwrap());
+        assert!(nested.is_dir(), "多级目录应被创建");
+        // 已存在时必须幂等，不能报错
+        ensure_ok(nested.to_str().unwrap());
+        // 空路径交给 issues() 处理，这里不建也不报错
+        ensure_ok("   ");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

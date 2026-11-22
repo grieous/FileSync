@@ -116,7 +116,9 @@ pub fn conflict_for(root: &str) -> Result<(), String> {
         if overlaps(root, &task.root) {
             return Err(format!(
                 "同步目录「{root}」与 WinSync.exe 的任务「{}」重叠（{}）。\
-                 两个程序同时同步同一目录会互相删文件，已拒绝启动",
+                 两个程序同时同步同一目录会互相删文件，已拒绝启动。\
+                 要在这个目录上用插件同步，请先在 exe 里删掉那个任务（暂停不算，\
+                 配置还在就会被拦），或者给插件换一个目录。",
                 task.name, task.root
             ));
         }

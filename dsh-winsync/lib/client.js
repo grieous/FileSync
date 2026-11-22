@@ -1106,7 +1106,7 @@ window.__ModuleLoader__.load({
               placeholder: task.has_token ? '已设置（留空表示不修改）' : '未设置',
             }),
             input('房间名', 'workspace', { hint: '两台设备必须相同' }),
-            input('本机目录', 'root', { hint: '必须是已存在的绝对路径' }),
+            input('本机目录', 'root', { hint: '绝对路径；目录不存在会自动创建' }),
             h(
               'div',
               { className: 'ws-field' },
@@ -1301,7 +1301,7 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'ws-hint' },
-                '必须是已存在的绝对路径。浏览器拿不到系统目录选择框，请从资源管理器复制路径粘贴。',
+                '绝对路径即可，目录不存在会自动创建。浏览器拿不到系统目录选择框，请从资源管理器复制路径粘贴。',
               ),
             ),
             h(

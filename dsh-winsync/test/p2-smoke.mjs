@@ -137,6 +137,33 @@ const state = await call('/state')
 assert.equal(state.body.tasks.length, 1)
 assert.equal(state.body.tasks[0].display_name, 'P2 冒烟')
 
+/* ---- 目录自动创建：界面允许直接填一个还不存在的路径 ---- */
+
+const freshRoot = path.join(root, 'auto', 'created', 'here')
+const autoTask = await call('/tasks', {
+  method: 'POST',
+  body: JSON.stringify({
+    server: 'ws://127.0.0.1:18443/ws',
+    token: 'p2-token',
+    workspace: 'default',
+    root: freshRoot,
+    name: '自动建目录',
+  }),
+})
+assert.equal(autoTask.status, 200, JSON.stringify(autoTask.body))
+assert.ok(fs.statSync(freshRoot).isDirectory(), '建任务时应自动创建不存在的目录')
+console.log('PASS 建任务时自动创建不存在的目录')
+await call(`/tasks/${autoTask.body.task.id}`, { method: 'DELETE' })
+
+const movedRoot = path.join(root, 'moved', 'elsewhere')
+const forced = await call(`/tasks/${taskId}`, {
+  method: 'PATCH',
+  body: JSON.stringify({ root: movedRoot, force: true }),
+})
+assert.equal(forced.status, 200, JSON.stringify(forced.body))
+assert.ok(fs.statSync(movedRoot).isDirectory(), '保存新目录时也应自动创建')
+console.log('PASS 改目录（force）时自动创建不存在的目录')
+
 const badRoot = await call(`/tasks/${taskId}`, {
   method: 'PATCH',
   body: JSON.stringify({ root: path.join(root, 'nope') }),
