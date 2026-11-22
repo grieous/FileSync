@@ -15,14 +15,15 @@
 //! TLS：本进程只监听明文 HTTP/WS。生产环境请放在 Caddy / nginx 后面终止 TLS，
 //! 或后续接入 rustls（见设计文档第 4.1 节）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -60,6 +61,42 @@ struct AppState {
     room_keys: Arc<StdMutex<RoomKeys>>,
     rooms: Arc<Mutex<HashMap<String, Room>>>,
     next_id: Arc<AtomicU64>,
+    /// 每个 IP 的连接时间戳窗口，用于挡住「6 位配对码被枚举」
+    rate: Arc<StdMutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    /// 每分钟允许的连接次数，0 表示不限
+    rate_limit: usize,
+}
+
+/// 简单滑动窗口限流：同一 IP 在 60 秒内最多 `limit` 次建连。
+/// 只在内存里，重启清零——中继本来就不落盘。
+fn allow_conn(
+    rate: &StdMutex<HashMap<IpAddr, VecDeque<Instant>>>,
+    ip: IpAddr,
+    limit: usize,
+) -> bool {
+    if limit == 0 {
+        return true;
+    }
+    let now = Instant::now();
+    let mut guard = match rate.lock() {
+        Ok(g) => g,
+        Err(_) => return true,
+    };
+    // 顺手清理太久没出现的 IP，避免一张表无限长
+    guard.retain(|_, q| q.back().map(|t| now.duration_since(*t).as_secs() < 600).unwrap_or(false));
+    let q = guard.entry(ip).or_default();
+    while let Some(front) = q.front() {
+        if now.duration_since(*front).as_secs() >= 60 {
+            q.pop_front();
+        } else {
+            break;
+        }
+    }
+    if q.len() >= limit {
+        return false;
+    }
+    q.push_back(now);
+    true
 }
 
 /// 房间级密钥表（必需）。
@@ -157,11 +194,21 @@ async fn main() {
         tracing::info!("未配置房间密钥：开放配对，靠客户端生成的随机房间码保证不可猜");
     }
     let addr = std::env::var("SYNC_ADDR").unwrap_or_else(|_| "0.0.0.0:8443".to_string());
+    // 6 位配对码只有 100 万种，必须限流，否则脚本几分钟就能扫穿
+    let rate_limit = std::env::var("SYNC_RATE_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(30);
+    if rate_limit > 0 {
+        tracing::info!("连接限流：每个 IP 每分钟最多 {rate_limit} 次");
+    }
 
     let state = AppState {
         room_keys: Arc::new(StdMutex::new(room_keys)),
         rooms: Arc::new(Mutex::new(HashMap::new())),
         next_id: Arc::new(AtomicU64::new(1)),
+        rate: Arc::new(StdMutex::new(HashMap::new())),
+        rate_limit,
     };
 
     let app = Router::new().route("/ws", get(ws_handler)).with_state(state);
@@ -170,14 +217,24 @@ async fn main() {
         .unwrap_or_else(|e| panic!("绑定 {addr} 失败: {e}"));
 
     tracing::info!("relay 已启动于 {addr}（无状态，不落盘）");
-    axum::serve(listener, app).await.expect("server 异常退出");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server 异常退出");
 }
 
 async fn ws_handler(
+    ConnectInfo(who): ConnectInfo<SocketAddr>,
     ws: WebSocketUpgrade,
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
+    if !allow_conn(&st.rate, who.ip(), st.rate_limit) {
+        tracing::warn!("拒绝连接：{} 超出每分钟 {} 次", who.ip(), st.rate_limit);
+        return (StatusCode::TOO_MANY_REQUESTS, "too many connections").into_response();
+    }
     let room = q
         .get("workspace")
         .cloned()

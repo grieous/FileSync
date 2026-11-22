@@ -304,6 +304,23 @@ window.__ModuleLoader__.load({
       return { server, room }
     }
 
+    /** 由房间码派生的 4 位校验码：两端显示的必须一样，用户口头核对（蓝牙式的「确认配对」）。 */
+    function verifyCode(room) {
+      let h = 0
+      for (const ch of String(room ?? '')) h = (h * 31 + ch.codePointAt(0)) >>> 0
+      return String((h ^ 0x5a5a) % 10000).padStart(4, '0')
+    }
+
+    /** 6 位配对码 → 配对房间名。短码只用来说「见个面」，配对完建议换成随机码。 */
+    function pairRoom(digits) {
+      const clean = String(digits ?? '').replace(/\D/g, '').slice(0, 6)
+      return clean.length === 6 ? `pair-${clean}` : ''
+    }
+
+    function newPairCode() {
+      return String(Math.floor(Math.random() * 1000000)).padStart(6, '0')
+    }
+
     /** 记录页把相对路径拼回磁盘绝对路径（任务目录 + 相对路径），分隔符统一成反斜杠。 */
     function fullPath(root, rel) {
       // 任务目录可能是正斜杠（API 建的任务）也可能是反斜杠（界面填的），先统一成反斜杠。
@@ -1184,7 +1201,23 @@ window.__ModuleLoader__.load({
                   '复制邀请',
                 ),
               ),
+              h(
+                'div',
+                { className: 'ws-field-row', style: { marginTop: 6 } },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'ws-btn',
+                    onClick: () => setForm({ ...form, workspace: newRoomCode() }),
+                  },
+                  '换成随机码',
+                ),
+              ),
               h('div', { className: 'ws-hint' }, '双方必须相同；点「复制邀请」把整串发对方'),
+              form.workspace.startsWith('pair-')
+                ? h('div', { className: 'ws-hint' }, `校验码 ${verifyCode(form.workspace)}：两端必须一致`)
+                : null,
               h('div', { className: 'ws-hint ws-mono' }, inviteOf(form.server, form.workspace)),
             ),
             h(
@@ -1252,6 +1285,7 @@ window.__ModuleLoader__.load({
         token: '',
         // 默认就生成一个随机房间码：不用再想名字，也不用去中继登记
         workspace: newRoomCode(),
+        pair: '',
         root: '',
         name: '',
         mode: 'bidirectional',
@@ -1408,6 +1442,50 @@ window.__ModuleLoader__.load({
                 { className: 'ws-hint' },
                 '随机生成，双方填同一个；对方粘邀请串就不用填这一项',
               ),
+              h(
+                'div',
+                { className: 'ws-field-row', style: { marginTop: 6 } },
+                h('input', {
+                  className: 'ws-input',
+                  placeholder: '6 位配对码（可选）',
+                  value: form.pair,
+                  maxLength: 6,
+                  inputMode: 'numeric',
+                  onChange: (e) => setForm({ ...form, pair: e.target.value.replace(/\D/g, '').slice(0, 6) }),
+                }),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'ws-btn',
+                    onClick: () => {
+                      const code = newPairCode()
+                      setForm({ ...form, pair: code, workspace: pairRoom(code) })
+                    },
+                  },
+                  '生成',
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'ws-btn',
+                    onClick: () => {
+                      const room = pairRoom(form.pair)
+                      if (!room) return store.notify('配对码要 6 位数字', 'bad')
+                      setForm({ ...form, workspace: room })
+                    },
+                  },
+                  '使用',
+                ),
+              ),
+              form.workspace.startsWith('pair-')
+                ? h(
+                    'div',
+                    { className: 'ws-hint' },
+                    `校验码 ${verifyCode(form.workspace)}：两端显示的数必须一样，对上了再继续`,
+                  )
+                : null,
               h('div', { className: 'ws-hint ws-mono' }, inviteOf(form.server, form.workspace)),
             ),
           )
