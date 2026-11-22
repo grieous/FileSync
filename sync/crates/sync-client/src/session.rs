@@ -698,9 +698,11 @@ pub async fn run(
         .map(|e| (e.path.clone(), e.clone()))
         .collect();
 
+    // 连不上时把**解析后的地址**带上：用户只填了 IP 时，默认端口（8443）到底补成什么，
+    // 只有在这里能看到。不带 token——url() 里含密钥，不能进日志和界面。
     let (ws, _) = tokio_tungstenite::connect_async(cfg.url().as_str())
         .await
-        .context("连接服务器失败")?;
+        .with_context(|| format!("连接服务器失败（{}）", cfg.server))?;
     let (sink, stream) = ws.split();
 
     let mut sess = Session {

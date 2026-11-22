@@ -1084,6 +1084,7 @@ window.__ModuleLoader__.load({
             onChange: (e) => setForm({ ...form, [key]: e.target.value }),
           }),
           options.hint ? h('div', { className: 'ws-hint' }, options.hint) : null,
+          options.preview ? h('div', { className: 'ws-hint ws-mono' }, options.preview) : null,
         )
 
       return h(
@@ -1100,6 +1101,7 @@ window.__ModuleLoader__.load({
             input('服务器地址', 'server', {
               placeholder: '192.168.3.222 或 192.168.3.222:18443',
               hint: `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}`,
+              preview: `将连接 ${normalizeServer(form.server) || '（待填写）'}`,
             }),
             input('密钥', 'token', {
               type: 'password',
@@ -1258,6 +1260,11 @@ window.__ModuleLoader__.load({
                 { className: 'ws-hint' },
                 `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}；协议头与 /ws 会自动补上`,
               ),
+              h(
+                'div',
+                { className: 'ws-hint ws-mono' },
+                `将连接 ${normalizeServer(form.server) || '（待填写）'}`,
+              ),
             ),
             h(
               'div',
@@ -1364,7 +1371,7 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-sub' },
-              `⇄  ${shortServer(form.server)}  ·  房间 ${form.workspace}`,
+              `⇄  ${shortServer(normalizeServer(form.server))}  ·  房间 ${form.workspace}`,
             ),
             issues.length > 0
               ? h(
