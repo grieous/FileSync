@@ -1393,35 +1393,6 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-field' },
-              h('label', null, '密钥'),
-              h(
-                'div',
-                { className: 'ws-field-row' },
-                h('input', {
-                  className: 'ws-input',
-                  type: showToken ? 'text' : 'password',
-                  value: form.token,
-                  onChange: (e) => setForm({ ...form, token: e.target.value }),
-                }),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'ws-btn',
-                    onClick: () => setShowToken((v) => !v),
-                  },
-                  showToken ? '隐藏' : '显示',
-                ),
-              ),
-              h(
-                'div',
-                { className: 'ws-hint' },
-                '中继为这个房间配的密钥（rooms.json 里对应那条；中继没配就起不来）',
-              ),
-            ),
-            h(
-              'div',
-              { className: 'ws-field' },
               h('label', null, '房间码'),
               h(
                 'div',
@@ -1486,7 +1457,11 @@ window.__ModuleLoader__.load({
                     `校验码 ${verifyCode(form.workspace)}：两端显示的数必须一样，对上了再继续`,
                   )
                 : null,
-              h('div', { className: 'ws-hint ws-mono' }, inviteOf(form.server, form.workspace)),
+              h(
+                'div',
+                { className: 'ws-hint ws-mono' },
+                form.server.trim() ? inviteOf(form.server, form.workspace) : '（填写服务器地址后生成邀请串）',
+              ),
             ),
           )
         }
