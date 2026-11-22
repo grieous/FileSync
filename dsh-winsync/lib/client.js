@@ -22,160 +22,183 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------ 样式 */
 
     const CSS = `
+/* 主题变量：默认深色；浅色主题由宿主 body[data-ds-dark-theme] 缺省时切过来。
+   换肤只改这一组变量，控件样式本身不用重复写。 */
+.ws-root{
+  --ws-bg:#0E0F10; --ws-side:#161719; --ws-card:#1C1D1F; --ws-input:#1A1B1D;
+  --ws-zebra:#121315; --ws-hover:#232427; --ws-chip:#26282B;
+  --ws-line:#2A2C2E; --ws-line-soft:#202225; --ws-line-strong:#33363A;
+  --ws-text:#EDEDEE; --ws-text-soft:#C9CBCF; --ws-dim:#A0A2A6;
+  --ws-muted:#8B8E94; --ws-faint:#6E7176; --ws-chip-text:#B9BBBF;
+  --ws-active:#1E355C; --ws-accent:#2B6CF6; --ws-accent-hover:#3B78F8;
+  --ws-ok:#4CC38A; --ws-warn:#E6A23C; --ws-danger:#F0554D;
+  --ws-danger-line:#4A2320; --ws-danger-bg:#2A1715;
+}
+.ws-root[data-theme="light"]{
+  --ws-bg:#F5F6F8; --ws-side:#FFFFFF; --ws-card:#FFFFFF; --ws-input:#FFFFFF;
+  --ws-zebra:#FAFBFC; --ws-hover:#EFF1F4; --ws-chip:#EEF0F3;
+  --ws-line:#E1E4E9; --ws-line-soft:#EDEFF3; --ws-line-strong:#CFD3D9;
+  --ws-text:#1B1D21; --ws-text-soft:#3D4147; --ws-dim:#5A5F66;
+  --ws-muted:#767C83; --ws-faint:#9AA0A7; --ws-chip-text:#4A4F55;
+  --ws-active:#DCE8FF; --ws-accent:#2B6CF6; --ws-accent-hover:#1F5CE0;
+  --ws-ok:#1F8A5B; --ws-warn:#A86800; --ws-danger:#C0352D;
+  --ws-danger-line:#E7C3BF; --ws-danger-bg:#FCEFEE;
+}
+
 /* 主区面板只能占 dsh 给它的那一格：不能用 absolute/inset:0——那会以 .frame
    为包含块，连左侧栏和 Windows 标题栏一起盖住（宿主 .frame 只靠 padding-top
    让出标题栏，absolute 元素贴的是 padding box 边缘，正好压上去）。宿主把
    main 槽塞在 display:contents 的包装里，所以这里直接作为 .mainPanel 的
    flex 子项撑满即可。 */
 .ws-root{position:relative;flex:1 1 auto;min-width:0;min-height:0;height:100%;
-  box-sizing:border-box;display:flex;background:#0E0F10;color:#EDEDEE;
+  box-sizing:border-box;display:flex;background:var(--ws-bg);color:var(--ws-text);
   font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","Microsoft YaHei",sans-serif;overflow:hidden;
   container-type:inline-size}
-.ws-side{width:180px;flex:0 0 180px;background:#161719;border-right:1px solid #2A2C2E;
+.ws-side{width:180px;flex:0 0 180px;background:var(--ws-side);border-right:1px solid var(--ws-line);
   display:flex;flex-direction:column;padding:14px 12px 12px}
 .ws-brand{display:flex;align-items:center;gap:8px;padding:2px 4px 0}
 /* 品牌位只留一个线条图标，和 dsh 自己的侧栏图标同一种做法：无底色块、
    currentColor、18px、1.5 描边。之前是蓝色圆角块 + 白字 W，太像第三方 App 的
    logo，放在 dsh 的灰度图标里很跳。 */
-.ws-mark{display:flex;align-items:center;justify-content:center;color:#C9CBCF;
+.ws-mark{display:flex;align-items:center;justify-content:center;color:var(--ws-text-soft);
   padding:1px 0}
-.ws-brand-name{font-size:15px;font-weight:600;color:#EDEDEE}
+.ws-brand-name{font-size:15px;font-weight:600;color:var(--ws-text)}
 .ws-nav{margin-top:18px;display:flex;flex-direction:column;gap:2px}
 .ws-nav-item{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border:0;
-  border-radius:6px;background:transparent;color:#A0A2A6;font:inherit;font-size:13px;
+  border-radius:6px;background:transparent;color:var(--ws-dim);font:inherit;font-size:13px;
   cursor:pointer;text-align:left;width:100%}
-.ws-nav-item:hover{background:#232427;color:#EDEDEE}
-.ws-nav-item[data-active="true"]{background:#1E355C;color:#EDEDEE}
+.ws-nav-item:hover{background:var(--ws-hover);color:var(--ws-text)}
+.ws-nav-item[data-active="true"]{background:var(--ws-active);color:var(--ws-text)}
 .ws-nav-item:focus,.ws-btn:focus,.ws-icon-btn:focus{outline:none}
 .ws-nav-item:focus-visible,.ws-btn:focus-visible,.ws-icon-btn:focus-visible{
-  outline:2px solid #2B6CF6;outline-offset:1px}
-.ws-side-foot{margin-top:auto;padding-top:10px;border-top:1px solid #24262A}
+  outline:2px solid var(--ws-accent);outline-offset:1px}
+.ws-side-foot{margin-top:auto;padding-top:10px;border-top:1px solid var(--ws-line-soft)}
 .ws-content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .ws-scroll{overflow:auto;padding:18px 24px 32px;flex:1}
 .ws-scroll::-webkit-scrollbar,.ws-raw-body::-webkit-scrollbar{width:8px;height:8px}
 .ws-scroll::-webkit-scrollbar-thumb,.ws-raw-body::-webkit-scrollbar-thumb{
-  background:#2A2C2E;border-radius:4px}
+  background:var(--ws-line);border-radius:4px}
 .ws-scroll::-webkit-scrollbar-thumb:hover,.ws-raw-body::-webkit-scrollbar-thumb:hover{
   background:#3A3D41}
 .ws-scroll::-webkit-scrollbar-track,.ws-raw-body::-webkit-scrollbar-track{background:transparent}
 .ws-row{display:flex;align-items:center;gap:10px}
 .ws-page-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
 .ws-title{font-size:18px;font-weight:600;margin:0}
-.ws-sub{color:#8B8E94;font-size:12px}
-.ws-device{color:#A0A2A6;font-size:12px;margin:8px 0 14px}
-.ws-btn{appearance:none;border:1px solid #2A2C2E;background:#232427;color:#EDEDEE;
+.ws-sub{color:var(--ws-muted);font-size:12px}
+.ws-device{color:var(--ws-dim);font-size:12px;margin:8px 0 14px}
+.ws-btn{appearance:none;border:1px solid var(--ws-line);background:var(--ws-hover);color:var(--ws-text);
   border-radius:6px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}
-.ws-btn:hover{background:#2A2C2E}
+.ws-btn:hover{background:var(--ws-line)}
 .ws-btn[disabled]{opacity:.45;cursor:not-allowed}
-.ws-btn-primary{background:#2B6CF6;border-color:#2B6CF6;color:#fff}
-.ws-btn-primary:hover{background:#3B78F8}
+.ws-btn-primary{background:var(--ws-accent);border-color:var(--ws-accent);color:#fff}
+.ws-btn-primary:hover{background:var(--ws-accent-hover)}
 .ws-btn-ghost{background:transparent}
-.ws-btn-danger{color:#F0554D;border-color:#4A2320}
-.ws-btn-danger:hover{background:#2A1715}
-.ws-card{background:#1C1D1F;border:1px solid #2A2C2E;border-radius:10px;padding:14px 16px;
+.ws-btn-danger{color:var(--ws-danger);border-color:var(--ws-danger-line)}
+.ws-btn-danger:hover{background:var(--ws-danger-bg)}
+.ws-card{background:var(--ws-card);border:1px solid var(--ws-line);border-radius:10px;padding:14px 16px;
   margin-bottom:12px}
-.ws-card[data-selected="true"]{border-color:#2B6CF6}
+.ws-card[data-selected="true"]{border-color:var(--ws-accent)}
 .ws-card-head{display:flex;align-items:flex-start;gap:10px}
-.ws-folder{width:30px;height:30px;border-radius:8px;background:#26282B;color:#B9BBBF;
+.ws-folder{width:30px;height:30px;border-radius:8px;background:var(--ws-chip);color:var(--ws-chip-text);
   display:flex;align-items:center;justify-content:center;flex:0 0 30px}
 .ws-task-name{font-size:15px;font-weight:600}
 .ws-task-state{font-size:12px}
 .ws-card-actions{margin-left:auto;display:flex;align-items:center;gap:6px}
-.ws-icon-btn{width:26px;height:26px;border-radius:13px;border:1px solid #2A2C2E;
-  background:transparent;color:#A0A2A6;cursor:pointer;display:flex;align-items:center;
+.ws-icon-btn{width:26px;height:26px;border-radius:13px;border:1px solid var(--ws-line);
+  background:transparent;color:var(--ws-dim);cursor:pointer;display:flex;align-items:center;
   justify-content:center;font-size:13px;line-height:1;padding:0}
-.ws-icon-btn:hover{background:#232427;color:#EDEDEE}
-.ws-menu{position:absolute;right:8px;top:34px;background:#232427;border:1px solid #2A2C2E;
+.ws-icon-btn:hover{background:var(--ws-hover);color:var(--ws-text)}
+.ws-menu{position:absolute;right:8px;top:34px;background:var(--ws-hover);border:1px solid var(--ws-line);
   border-radius:8px;padding:4px;min-width:112px;z-index:20;box-shadow:0 8px 24px rgba(0,0,0,.45)}
 .ws-menu button{display:block;width:100%;text-align:left;border:0;background:transparent;
-  color:#EDEDEE;font:inherit;font-size:12px;padding:6px 10px;border-radius:5px;cursor:pointer}
-.ws-menu button:hover{background:#2A2C2E}
-.ws-menu hr{border:0;border-top:1px solid #2A2C2E;margin:4px 2px}
-.ws-progress{height:6px;border-radius:3px;background:#2A2C2E;overflow:hidden;margin-top:10px}
-.ws-progress>i{display:block;height:100%;background:#2B6CF6;transition:width .2s}
+  color:var(--ws-text);font:inherit;font-size:12px;padding:6px 10px;border-radius:5px;cursor:pointer}
+.ws-menu button:hover{background:var(--ws-line)}
+.ws-menu hr{border:0;border-top:1px solid var(--ws-line);margin:4px 2px}
+.ws-progress{height:6px;border-radius:3px;background:var(--ws-line);overflow:hidden;margin-top:10px}
+.ws-progress>i{display:block;height:100%;background:var(--ws-accent);transition:width .2s}
 .ws-info{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px;
-  padding-top:12px;border-top:1px solid #2A2C2E}
-.ws-info dt{color:#8B8E94;font-size:11px;margin:0 0 3px}
-.ws-info dd{margin:0;font-size:12px;color:#EDEDEE;overflow:hidden;text-overflow:ellipsis;
+  padding-top:12px;border-top:1px solid var(--ws-line)}
+.ws-info dt{color:var(--ws-muted);font-size:11px;margin:0 0 3px}
+.ws-info dd{margin:0;font-size:12px;color:var(--ws-text);overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap}
 .ws-task-foot{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
-.ws-issues{margin-top:8px;color:#F0554D;font-size:12px}
-.ws-empty{padding:48px 10px;text-align:center;color:#8B8E94}
-.ws-empty strong{display:block;color:#EDEDEE;font-size:14px;font-weight:500;margin-bottom:6px}
+.ws-issues{margin-top:8px;color:var(--ws-danger);font-size:12px}
+.ws-empty{padding:48px 10px;text-align:center;color:var(--ws-muted)}
+.ws-empty strong{display:block;color:var(--ws-text);font-size:14px;font-weight:500;margin-bottom:6px}
 .ws-table{width:100%;border-collapse:collapse;font-size:12px}
-.ws-table th{text-align:left;color:#8B8E94;font-weight:500;padding:7px 8px;letter-spacing:.02em;
-  border-bottom:1px solid #2A2C2E;position:sticky;top:0;background:#0E0F10}
-.ws-table td{padding:7px 8px;border-bottom:1px solid #202225;vertical-align:top}
-.ws-table tbody tr:hover{background:#1A1B1D}
-.ws-table tbody tr:nth-child(even){background:#121315}
-.ws-table tbody tr:nth-child(even):hover{background:#1A1B1D}
+.ws-table th{text-align:left;color:var(--ws-muted);font-weight:500;padding:7px 8px;letter-spacing:.02em;
+  border-bottom:1px solid var(--ws-line);position:sticky;top:0;background:var(--ws-bg)}
+.ws-table td{padding:7px 8px;border-bottom:1px solid var(--ws-line-soft);vertical-align:top}
+.ws-table tbody tr:hover{background:var(--ws-input)}
+.ws-table tbody tr:nth-child(even){background:var(--ws-zebra)}
+.ws-table tbody tr:nth-child(even):hover{background:var(--ws-input)}
 .ws-table tbody tr:last-child td{border-bottom:0}
 /* 序号列窄、右对齐；路径列吃掉剩余宽度，太长时省略号，鼠标悬停看完整路径。 */
-.ws-table th.ws-col-idx,.ws-table td.ws-col-idx{width:40px;text-align:right;color:#8B8E94}
+.ws-table th.ws-col-idx,.ws-table td.ws-col-idx{width:40px;text-align:right;color:var(--ws-muted)}
 /* 路径要能看全：不省略、允许在分隔符处换行，长路径自然折成两行。 */
-.ws-table td.ws-path{white-space:normal;word-break:break-all;min-width:240px;color:#C9CBCF}
+.ws-table td.ws-path{white-space:normal;word-break:break-all;min-width:240px;color:var(--ws-text-soft)}
 /* 密钥这类敏感字段：输入框 + 右侧「显示/隐藏」，按钮不抢输入框的宽度 */
 .ws-field-row{display:flex;align-items:center;gap:8px}
 .ws-field-row .ws-input{flex:1 1 auto;min-width:0}
 .ws-field-row .ws-btn{flex:0 0 auto;height:32px}
 /* 向导第一步的两个入口：加入 / 创建，别再让人猜 */
 .ws-tabs{display:flex;gap:6px;margin-bottom:12px}
-.ws-tab{flex:1 1 0;height:32px;border:1px solid #2A2C2E;background:#1C1D1F;color:#A0A2A6;
+.ws-tab{flex:1 1 0;height:32px;border:1px solid var(--ws-line);background:var(--ws-card);color:var(--ws-dim);
   border-radius:6px;font:inherit;font-size:12px;cursor:pointer}
-.ws-tab[data-active="true"]{background:#1E355C;border-color:#2B6CF6;color:#EDEDEE}
-.ws-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#A0A2A6}
+.ws-tab[data-active="true"]{background:var(--ws-active);border-color:var(--ws-accent);color:var(--ws-text)}
+.ws-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--ws-dim)}
 .ws-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0 12px}
-.ws-input,.ws-select{background:#1C1D1F;border:1px solid #2A2C2E;border-radius:6px;
-  color:#EDEDEE;font:inherit;font-size:12px;padding:5px 8px;min-width:0}
-.ws-input:focus,.ws-select:focus{outline:none;border-color:#2B6CF6}
+.ws-input,.ws-select{background:var(--ws-card);border:1px solid var(--ws-line);border-radius:6px;
+  color:var(--ws-text);font:inherit;font-size:12px;padding:5px 8px;min-width:0}
+.ws-input:focus,.ws-select:focus{outline:none;border-color:var(--ws-accent)}
 .ws-field{margin-bottom:10px}
-.ws-field label{display:block;color:#A0A2A6;font-size:12px;margin-bottom:4px}
+.ws-field label{display:block;color:var(--ws-dim);font-size:12px;margin-bottom:4px}
 .ws-field .ws-input,.ws-field .ws-select{width:100%;box-sizing:border-box;padding:6px 9px;height:32px}
 .ws-field .ws-num{max-width:180px}
-.ws-field .ws-hint{color:#8B8E94;font-size:11px;margin-top:4px}
+.ws-field .ws-hint{color:var(--ws-muted);font-size:11px;margin-top:4px}
 .ws-overlay{position:absolute;inset:0;background:rgba(0,0,0,.55);display:flex;
   align-items:center;justify-content:center;z-index:40}
-.ws-modal{background:#161719;border:1px solid #2A2C2E;border-radius:12px;width:min(620px,92%);
+.ws-modal{background:var(--ws-side);border:1px solid var(--ws-line);border-radius:12px;width:min(620px,92%);
   max-height:88%;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.6)}
-.ws-modal-head{padding:14px 18px;border-bottom:1px solid #2A2C2E;font-size:15px;font-weight:600;
+.ws-modal-head{padding:14px 18px;border-bottom:1px solid var(--ws-line);font-size:15px;font-weight:600;
   flex:0 0 auto}
 /* min-height:0 是 flex 子项能真正滚动的关键，否则内容会把弹窗撑破 */
 .ws-modal-body{padding:14px 18px;overflow:auto;min-height:0;flex:1 1 auto}
 .ws-modal-body::-webkit-scrollbar{width:8px}
-.ws-modal-body::-webkit-scrollbar-thumb{background:#2A2C2E;border-radius:4px}
+.ws-modal-body::-webkit-scrollbar-thumb{background:var(--ws-line);border-radius:4px}
 .ws-modal-body::-webkit-scrollbar-thumb:hover{background:#3A3D41}
 .ws-modal-body::-webkit-scrollbar-track{background:transparent}
-.ws-modal-foot{padding:12px 18px;border-top:1px solid #2A2C2E;display:flex;
+.ws-modal-foot{padding:12px 18px;border-top:1px solid var(--ws-line);display:flex;
   justify-content:flex-end;gap:8px;flex:0 0 auto}
 .ws-steps{display:flex;gap:8px;margin-bottom:16px}
-.ws-step{flex:1;border-top:2px solid #2A2C2E;padding-top:6px;color:#6E7176;font-size:11px;
+.ws-step{flex:1;border-top:2px solid var(--ws-line);padding-top:6px;color:var(--ws-faint);font-size:11px;
   transition:border-color .15s,color .15s}
-.ws-step[data-state="done"]{border-color:#1E4FA8;color:#8B8E94}
-.ws-step[data-state="on"]{border-color:#2B6CF6;color:#EDEDEE;font-weight:600}
+.ws-step[data-state="done"]{border-color:#1E4FA8;color:var(--ws-muted)}
+.ws-step[data-state="on"]{border-color:var(--ws-accent);color:var(--ws-text);font-weight:600}
 .ws-toast{position:absolute;left:50%;transform:translateX(-50%);bottom:18px;z-index:60;
-  background:#232427;border:1px solid #2A2C2E;border-radius:8px;padding:8px 14px;
+  background:var(--ws-hover);border:1px solid var(--ws-line);border-radius:8px;padding:8px 14px;
   font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45);max-width:70%}
 .ws-toast[data-tone="bad"]{border-color:#5A2A26;color:#FFB4AF}
 .ws-toast[data-tone="ok"]{border-color:#25503C;color:#9BE3BF}
 .ws-banner{padding:8px 12px;border-radius:8px;font-size:12px;
-  background:#2A2318;border:1px solid #4A3A18;color:#E6A23C;display:flex;gap:10px;align-items:center}
+  background:#2A2318;border:1px solid #4A3A18;color:var(--ws-warn);display:flex;gap:10px;align-items:center}
 .ws-raw{position:absolute;right:16px;bottom:16px;width:min(680px,72%);max-height:56%;
-  background:#161719;border:1px solid #2A2C2E;border-radius:10px;display:flex;
+  background:var(--ws-side);border:1px solid var(--ws-line);border-radius:10px;display:flex;
   flex-direction:column;z-index:50;box-shadow:0 18px 40px rgba(0,0,0,.55)}
 .ws-raw-head{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;
-  border-bottom:1px solid #2A2C2E;font-size:12px;color:#A0A2A6}
+  border-bottom:1px solid var(--ws-line);font-size:12px;color:var(--ws-dim)}
 .ws-raw-body{overflow:auto;padding:8px 12px;font-family:ui-monospace,Consolas,monospace;
-  font-size:11.5px;line-height:1.65;color:#A0A2A6;white-space:pre-wrap;word-break:break-all}
+  font-size:11.5px;line-height:1.65;color:var(--ws-dim);white-space:pre-wrap;word-break:break-all}
 .ws-link{color:#5B92FF;cursor:pointer;background:none;border:0;font:inherit;padding:0}
 /* 开关：比原生复选框更像「设置项」，也和卡片里的圆钮风格统一 */
-.ws-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;color:#A0A2A6;font-size:12px}
+.ws-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;color:var(--ws-dim);font-size:12px}
 .ws-switch input{appearance:none;-webkit-appearance:none;width:32px;height:18px;border-radius:9px;
-  background:#2A2C2E;position:relative;margin:0;cursor:pointer;transition:background .15s}
-.ws-switch input:checked{background:#2B6CF6}
+  background:var(--ws-line);position:relative;margin:0;cursor:pointer;transition:background .15s}
+.ws-switch input:checked{background:var(--ws-accent)}
 .ws-switch input::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;
-  border-radius:50%;background:#EDEDEE;transition:transform .15s}
+  border-radius:50%;background:var(--ws-text);transition:transform .15s}
 .ws-switch input:checked::after{transform:translateX(14px)}
-.ws-switch:hover{color:#EDEDEE}
+.ws-switch:hover{color:var(--ws-text)}
 
 /* 面板宽度取决于 dsh 的分栏，不跟视口走，所以用容器查询而不是媒体查询 */
 @container (max-width: 820px){
@@ -309,6 +332,20 @@ window.__ModuleLoader__.load({
       return { server, room }
     }
 
+    /**
+     * dsh 的主题标记：body 上有 `data-ds-dark-theme` 就是深色，没有就是浅色；
+     * 再退一步看 html 的 color-scheme，最后才用系统偏好。
+     */
+    function readTheme() {
+      if (typeof document === 'undefined') return 'dark'
+      const body = document.body
+      if (body && body.hasAttribute('data-ds-dark-theme')) return 'dark'
+      const scheme = document.documentElement?.style?.colorScheme || ''
+      if (scheme === 'light') return 'light'
+      if (scheme === 'dark') return 'dark'
+      return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+    }
+
     /** 由房间码派生的 4 位校验码：两端显示的必须一样，用户口头核对（蓝牙式的「确认配对」）。 */
     function verifyCode(room) {
       let h = 0
@@ -324,6 +361,65 @@ window.__ModuleLoader__.load({
 
     function newPairCode() {
       return String(Math.floor(Math.random() * 1000000)).padStart(6, '0')
+    }
+
+    /**
+     * 直连中继探测「房间里有没有对端」：浏览器开一条 WS，发 Hello，等 PeerStatus。
+     * 只用于向导里的「检测配对」，不参与真正的同步（同步由 daemon 做）。
+     */
+    function probePeer(url, room, timeoutMs = 8000) {
+      return new Promise((resolve, reject) => {
+        let settled = false
+        let ws
+        try {
+          ws = new WebSocket(url)
+        } catch (e) {
+          reject(new Error('地址无效'))
+          return
+        }
+        ws.binaryType = 'arraybuffer'
+        const fail = (msg) => {
+          if (settled) return
+          settled = true
+          try { ws.close() } catch {}
+          reject(new Error(msg))
+        }
+        const timer = setTimeout(() => fail('超时，没等到中继回应'), timeoutMs)
+        ws.addEventListener('open', () => {
+          const hello = {
+            t: 'hello',
+            device_id: `probe-${Math.random().toString(16).slice(2, 10)}`,
+            workspace_id: room,
+            proto_ver: 1,
+          }
+          const body = new TextEncoder().encode(JSON.stringify(hello))
+          const frame = new Uint8Array(1 + body.length)
+          frame[0] = 0
+          frame.set(body, 1)
+          ws.send(frame)
+        })
+        ws.addEventListener('message', (e) => {
+          try {
+            const msg = JSON.parse(new TextDecoder().decode(new Uint8Array(e.data).subarray(1)))
+            if (msg.t === 'peer_status') {
+              clearTimeout(timer)
+              settled = true
+              try { ws.close() } catch {}
+              resolve({ online: !!msg.peer_online, peer: msg.peer_device_id || '' })
+            }
+          } catch {
+            /* 其它帧忽略 */
+          }
+        })
+        ws.addEventListener('error', () => {
+          clearTimeout(timer)
+          fail('连不上中继，检查地址和端口')
+        })
+        ws.addEventListener('close', () => {
+          clearTimeout(timer)
+          fail('连接被关闭：房间可能已满，或中继要求密钥')
+        })
+      })
     }
 
     /** 记录页把相对路径拼回磁盘绝对路径（任务目录 + 相对路径），分隔符统一成反斜杠。 */
@@ -1285,6 +1381,9 @@ window.__ModuleLoader__.load({
       const [step, setStep] = React.useState(0)
       const [busy, setBusy] = React.useState(false)
       const [entry, setEntry] = React.useState('create')
+      const [paired, setPaired] = React.useState(null)
+      const [checking, setChecking] = React.useState(false)
+      const [peerId, setPeerId] = React.useState('')
       const copyInvite = async () => {
         const text = inviteOf(form.server, form.workspace)
         try {
@@ -1307,6 +1406,32 @@ window.__ModuleLoader__.load({
         dotfiles: false,
         ext: '',
       })
+
+      // 服务器或房间码一变，之前的「已配对」结论就不算数了
+      React.useEffect(() => {
+        setPaired(null)
+        setPeerId('')
+      }, [form.server, form.workspace])
+
+      const checkPairing = async () => {
+        const url = normalizeServer(form.server)
+        if (!url || !form.workspace.trim()) return store.notify('先填服务器和房间码', 'bad')
+        setChecking(true)
+        setPaired(null)
+        try {
+          const info = await probePeer(url, form.workspace)
+          setPaired(info.online)
+          setPeerId(info.peer)
+          if (!info.online) {
+            store.notify('对端还没上线：让对方用同一个房间码（或 6 位配对码）连上再点一次', 'warn')
+          }
+        } catch (e) {
+          setPaired(false)
+          store.notify(`检测失败：${e.message}`, 'bad')
+        } finally {
+          setChecking(false)
+        }
+      }
 
       const issues = []
       if (!form.workspace.trim()) issues.push('未填写房间码')
@@ -1569,6 +1694,42 @@ window.__ModuleLoader__.load({
                       : '（填写服务器地址后生成邀请串）',
                   ),
                 ),
+            h(
+              'div',
+              { className: 'ws-card', style: { marginTop: 12 } },
+              h(
+                'div',
+                { className: 'ws-row', style: { justifyContent: 'space-between' } },
+                h(
+                  'div',
+                  null,
+                  h(
+                    'div',
+                    { style: { fontWeight: 600 } },
+                    paired === true
+                      ? `配对已通过${peerId ? ` · 对端 ${peerId.slice(0, 8)}` : ''}`
+                      : paired === false
+                        ? '对端不在线'
+                        : '尚未检测配对',
+                  ),
+                  h(
+                    'div',
+                    { className: 'ws-hint' },
+                    '两端必须在同一个房间；配对通过后才能进入下一步设置目录',
+                  ),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'ws-btn',
+                    disabled: checking,
+                    onClick: () => void checkPairing(),
+                  },
+                  checking ? '检测中…' : '检测配对',
+                ),
+              ),
+            ),
           )
         }
         if (step === 1) {
@@ -1688,11 +1849,11 @@ window.__ModuleLoader__.load({
                   'button',
                   {
                     className: 'ws-btn ws-btn-primary',
-                    disabled: issues.length > 0,
-                    title: issues.join('；'),
+                    disabled: issues.length > 0 || !paired,
+                    title: issues.length > 0 ? issues.join('；') : paired ? '' : '先点「检测配对」，确认对端在线',
                     onClick: () => setStep(step + 1),
                   },
-                  '下一步',
+                  paired ? '下一步' : '下一步（先完成配对）',
                 )
               : h(
                   'button',
@@ -1737,6 +1898,20 @@ window.__ModuleLoader__.load({
     function WinsyncApp() {
       ensureStyles()
       const store = useStore()
+      const [theme, setTheme] = React.useState(readTheme)
+      React.useEffect(() => {
+        const sync = () => setTheme(readTheme())
+        const observer = new MutationObserver(sync)
+        if (document.body) observer.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+        observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-ds-theme-source'] })
+        const media = window.matchMedia?.('(prefers-color-scheme: light)')
+        media?.addEventListener?.('change', sync)
+        sync()
+        return () => {
+          observer.disconnect()
+          media?.removeEventListener?.('change', sync)
+        }
+      }, [])
       const [tab, setTab] = React.useState('tasks')
       const [editing, setEditing] = React.useState(null)
       const [wizard, setWizard] = React.useState(false)
@@ -1757,7 +1932,7 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { className: 'ws-root' },
+        { className: 'ws-root', 'data-theme': theme },
         h(
           'aside',
           { className: 'ws-side' },

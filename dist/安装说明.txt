@@ -1,0 +1,23 @@
+WinSync / dsh-winsync 发布包（2026-11-22，插件 0.5.0 / 中继 0.5）
+
+一、dsh 插件（Windows）
+  1. dsh plugin --profile desktop add "本目录\dsh-winsync-0.5.0.tgz"
+  2. 把 winsync-daemon.exe 放到 %LOCALAPPDATA%\dsh-winsync\bin\（tgz 不含二进制）
+  3. 重启 dsh，左侧栏出现「文件同步」
+  4. 新建任务：选「加入已有同步」粘对方邀请串，或选「创建新同步」生成邀请码
+     - 配对未通过时「下一步」是灰的：先点「检测配对」
+
+二、中继（Linux / Docker）
+  1. docker load < winsync-relay-0.5.tar.gz
+  2. 开放配对（默认，靠随机房间码保密）：
+       docker run -d --name winsync-relay -p 18443:8443 --restart=always \
+         -e SYNC_RATE_LIMIT=30 winsync-relay:0.5
+  3. 需要固定口令时，加 -e SYNC_ROOM_TOKENS='{"default":"你的密钥"}'（配了就逐房间校验）
+
+三、目录
+  dsh-winsync-0.5.0.tgz        插件包（lib/* + package.json）
+  winsync-relay-0.5.tar.gz     中继镜像（docker load 导入）
+  winsync-daemon.exe           插件后台服务（6.2 MB）
+  winsync.exe                  命令行客户端（排查用）
+  winsync-gui.exe              独立图形界面（不装 dsh 也能用）
+  SHA256SUMS.txt               校验值

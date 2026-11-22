@@ -1,6 +1,6 @@
 {
   "name": "dsh-winsync",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "type": "module",
   "description": "WinSync inside DeepSeek Harness — daemon proxy, agent tools and the sync panel",
   "author": "gjn86",
