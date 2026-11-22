@@ -97,8 +97,8 @@ npm run pack:tgz
 ```
 
 版本号按 patch 递增；安装到别的机器用 `dsh plugin --profile <名> add <tgz 路径>`。
-tgz 里**不含** daemon 二进制，`winsync-daemon.exe` 需要单独放到
-`%LOCALAPPDATA%\dsh-winsync\bin\`。
+tgz **内嵌** `bin/winsync-daemon.exe`（压缩后约 2.9 MB），所以只装插件就能用；
+如果偏好里设了 `binPath` 或环境变量 `WINSYNC_DAEMON_BIN`，会优先用那些。
 
 ## 偏好
 

@@ -123,7 +123,9 @@ export class DaemonManager {
     if (this.prefs.binPath) candidates.push(this.prefs.binPath)
     if (process.env.WINSYNC_DAEMON_BIN) candidates.push(process.env.WINSYNC_DAEMON_BIN)
     const local = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local')
-    // 插件自己的安装位：与 exe 的 Programs\WinSync 分开，卸载插件不影响 exe
+    // 随插件一起装的（npm 包里带 bin/），只装 dsh 插件也能跑
+    candidates.push(path.resolve(HERE, '..', 'bin', 'winsync-daemon.exe'))
+    // 插件自己的数据目录：用户手动放进去的副本
     candidates.push(path.join(this.dir, 'bin', 'winsync-daemon.exe'))
     candidates.push(path.join(local, 'Programs', 'WinSync', 'winsync-daemon.exe'))
     for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
