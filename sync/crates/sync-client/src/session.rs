@@ -707,7 +707,7 @@ pub async fn run(
         .map_err(|e| {
             let hint = if matches!(&e, tokio_tungstenite::tungstenite::Error::Http(resp) if resp.status() == 401)
             {
-                "：密钥与服务器不一致，请核对中继启动时的 SYNC_TOKEN"
+                "：密钥与服务器不一致，请核对该房间的密钥（或中继启动时的 SYNC_TOKEN）"
             } else {
                 ""
             };

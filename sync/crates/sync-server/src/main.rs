@@ -9,14 +9,17 @@
 //! 客户端会自动重连并重新配对，没有任何状态需要恢复。
 //!
 //! 启动：
-//!   SYNC_TOKEN=<shared> SYNC_ADDR=0.0.0.0:8443 cargo run -p sync-server
+//!   SYNC_ADDR=0.0.0.0:8443 cargo run -p sync-server                  # 纯隧道
+//!   SYNC_ROOMS=/etc/sync/rooms.json SYNC_ADDR=0.0.0.0:8443 cargo run  # 房间级密钥
 //!
 //! TLS：本进程只监听明文 HTTP/WS。生产环境请放在 Caddy / nginx 后面终止 TLS，
 //! 或后续接入 rustls（见设计文档第 4.1 节）。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::SystemTime;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -53,9 +56,80 @@ struct Client {
 
 #[derive(Clone)]
 struct AppState {
-    token: Arc<String>,
+    /// 房间级密钥：每个房间一个，互相独立；空表 = 纯隧道模式（不校验）
+    room_keys: Arc<StdMutex<RoomKeys>>,
     rooms: Arc<Mutex<HashMap<String, Room>>>,
     next_id: Arc<AtomicU64>,
+}
+
+/// 房间级密钥表（可选）。
+///
+/// 中继本身只做隧道：配对 + 转发，不存任何数据。密钥是**可选的**一层门禁：
+///   - 配了：`SYNC_ROOMS=/etc/sync/rooms.json`，内容 `{"office":"tokenA","family":"tokenB"}`
+///     或 `SYNC_ROOM_TOKENS='{"office":"tokenA"}'`（容器里不方便挂文件时）。
+///     此时**每个**房间都必须能查到密钥，查不到的一律拒绝，避免「配了一半」变成敞口。
+///   - 没配：纯隧道模式，任何房间都放行（适合整台中继放在内网 / VPN 后面）。
+///
+/// 文件改了不用重启，按 mtime 自动重读。
+#[derive(Default)]
+struct RoomKeys {
+    path: Option<PathBuf>,
+    inline: Option<String>,
+    cache: Option<(Option<SystemTime>, HashMap<String, String>)>,
+}
+
+impl RoomKeys {
+    fn from_env() -> Self {
+        let path = std::env::var_os("SYNC_ROOMS").map(PathBuf::from);
+        let inline = std::env::var("SYNC_ROOM_TOKENS").ok().filter(|s| !s.trim().is_empty());
+        Self {
+            path,
+            inline,
+            cache: None,
+        }
+    }
+
+    fn configured(&self) -> bool {
+        self.path.is_some() || self.inline.is_some()
+    }
+
+    fn read_map(&self) -> Option<HashMap<String, String>> {
+        let text = if let Some(raw) = &self.inline {
+            raw.clone()
+        } else {
+            let path = self.path.as_ref()?;
+            std::fs::read_to_string(path).ok()?
+        };
+        let text = text.trim_start_matches('\u{feff}');
+        match serde_json::from_str::<HashMap<String, String>>(text) {
+            Ok(map) => Some(map),
+            Err(e) => {
+                tracing::error!("房间密钥表解析失败（按空表处理）：{e}");
+                None
+            }
+        }
+    }
+
+    /// 返回该房间的专属密钥；没配置返回 None。
+    fn for_room(&mut self, room: &str) -> Option<String> {
+        let mtime = self
+            .path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        let stale = match &self.cache {
+            Some((cached, _)) => *cached != mtime,
+            None => true,
+        };
+        if stale {
+            let map = self.read_map().unwrap_or_default();
+            self.cache = Some((mtime, map));
+        }
+        self.cache
+            .as_ref()
+            .and_then(|(_, map)| map.get(room).cloned())
+            .filter(|t| !t.is_empty())
+    }
 }
 
 #[tokio::main]
@@ -67,14 +141,19 @@ async fn main() {
         )
         .init();
 
-    let token = std::env::var("SYNC_TOKEN").unwrap_or_else(|_| {
-        tracing::warn!("SYNC_TOKEN 未设置，使用开发默认值 dev-token（生产环境必须设置）");
-        "dev-token".to_string()
-    });
+    let room_keys = RoomKeys::from_env();
+    if room_keys.configured() {
+        tracing::info!("已启用房间级密钥：每个房间用各自的密钥，查不到房间的密钥就拒绝");
+    } else {
+        tracing::warn!(
+            "未配置 SYNC_ROOMS / SYNC_ROOM_TOKENS：按纯隧道运行，不做鉴权。\
+             只应在内网或 VPN 后面这么部署"
+        );
+    }
     let addr = std::env::var("SYNC_ADDR").unwrap_or_else(|_| "0.0.0.0:8443".to_string());
 
     let state = AppState {
-        token: Arc::new(token),
+        room_keys: Arc::new(StdMutex::new(room_keys)),
         rooms: Arc::new(Mutex::new(HashMap::new())),
         next_id: Arc::new(AtomicU64::new(1)),
     };
@@ -93,14 +172,32 @@ async fn ws_handler(
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    if q.get("token").map(String::as_str) != Some(st.token.as_str()) {
-        tracing::warn!("拒绝连接：token 不匹配");
-        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
-    }
     let room = q
         .get("workspace")
         .cloned()
         .unwrap_or_else(|| "default".to_string());
+    let presented = q.get("token").map(String::as_str);
+    // 三种状态要区分清楚：没配表（纯隧道）／配了表但这一间没密钥（拒绝）／有密钥（比对）。
+    // 之前把后两种混成一个 None，结果纯隧道模式也被拒，联调时一眼就能看出来。
+    let (enforcing, expected) = match st.room_keys.lock() {
+        Ok(mut keys) => (keys.configured(), keys.for_room(&room)),
+        Err(_) => (false, None),
+    };
+    let allowed = if !enforcing {
+        true
+    } else {
+        match expected.as_deref() {
+            Some(room_token) => presented == Some(room_token),
+            None => {
+                tracing::warn!("拒绝连接：房间 {room} 没有配置密钥（已启用房间级密钥）");
+                false
+            }
+        }
+    };
+    if !allowed {
+        tracing::warn!("拒绝连接：房间 {room} 的密钥不匹配");
+        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+    }
     ws.on_upgrade(move |socket| handle(socket, st, room))
         .into_response()
 }

@@ -157,10 +157,8 @@ impl Config {
     }
 
     pub fn is_ready(&self) -> bool {
-        !self.server.is_empty()
-            && !self.token.is_empty()
-            && !self.root.is_empty()
-            && std::path::Path::new(&self.root).is_dir()
+        // 密钥现在是可选的：中继默认纯隧道（不校验），配了房间密钥才必须与服务器一致。
+        !self.server.is_empty() && !self.root.is_empty() && std::path::Path::new(&self.root).is_dir()
     }
 
     /// 逐项检查，返回人能看懂的问题列表。
@@ -176,9 +174,6 @@ impl Config {
             v.push("服务器地址通常以 /ws 结尾，例如 ws://192.168.3.222:18443/ws".into());
         }
 
-        if self.token.trim().is_empty() {
-            v.push("未填写密钥（要与服务器的 SYNC_TOKEN 完全一致）".into());
-        }
         if self.workspace.trim().is_empty() {
             v.push("未填写房间名（两台设备必须相同）".into());
         }

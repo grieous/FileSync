@@ -126,13 +126,15 @@ function writeConfig(stateDir, task) {
   fs.writeFileSync(path.join(stateDir, 'config.json'), JSON.stringify(config, null, 2))
 }
 
-function cliSync(stateDir, extra = []) {
-  return run(CLI, [...extra, '--wait', '25', 'sync'], { env: { WINSYNC_STATE_DIR: stateDir } })
+function cliSync(stateDir, { extra = [], wait = 25 } = {}) {
+  return run(CLI, [...extra, '--wait', String(wait), 'sync'], {
+    env: { WINSYNC_STATE_DIR: stateDir },
+  })
 }
 
 /** 两端同时跑一次同步——会话需要两边同时在线上才能配对。 */
 async function syncBoth(left, right, { leftArgs = [], rightArgs = [] } = {}) {
-  const [a, b] = await Promise.all([cliSync(left.state, leftArgs), cliSync(right.state, rightArgs)])
+  const [a, b] = await Promise.all([cliSync(left.state, { extra: leftArgs }), cliSync(right.state, { extra: rightArgs })])
   if (process.env.E2E_VERBOSE) {
     console.log(`  --- ${left.name} (exit ${a.code})\n${a.out}`)
     console.log(`  --- ${right.name} (exit ${b.code})\n${b.out}`)
@@ -362,17 +364,53 @@ scenario('filter-mismatch', async (ctx) => {
   eq(Object.keys(filesOf(right)), ['other.txt'], '右端文件零改动（没收到 .tmp，也没丢 other.txt）')
 })
 
-/* ------------------------------------------------------------------ 4.2 密钥不匹配 */
+/* ------------------------------------------------------------------ 4.2 房间级密钥 */
 
-scenario('auth', async (ctx) => {
-  const peer = makePeer('wrong-token', { ...ctx, token: 'not-the-relay-token' })
-  writeTree(peer.root, { 'a.txt': 'A' })
+scenario('room-keys', async (ctx) => {
+  // 这条自己起一个中继：只配置房间密钥，不给全局 SYNC_TOKEN。
+  const roomsFile = path.join(WORK, current.name, 'rooms.json')
+  fs.mkdirSync(path.dirname(roomsFile), { recursive: true })
+  fs.writeFileSync(roomsFile, JSON.stringify({ 'room-a': 'key-a', 'room-b': 'key-b' }))
 
-  const round = await cliSync(peer.state)
-  ok(round.code !== 0, '密钥错误：连接被拒绝（非零退出）')
-  contains(round.out, '连接服务器失败', '报错说明是连接阶段失败')
-  contains(round.out, '密钥与服务器不一致', '把 401 翻译成「密钥不一致」而不是裸 HTTP 错误')
-  contains(round.out, 'ws://127.0.0.1', '报错里带上解析后的服务器地址')
+  const port = await freePort()
+  const relay = spawn(RELAY, [], {
+    env: { ...process.env, SYNC_ROOMS: roomsFile, SYNC_ADDR: `127.0.0.1:${port}`, RUST_LOG: 'warn' },
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let relayOut = ''
+  relay.stdout.on('data', (d) => (relayOut += d))
+  relay.stderr.on('data', (d) => (relayOut += d))
+  const server = `ws://127.0.0.1:${port}/ws`
+  for (let i = 0; i < 60; i += 1) {
+    const up = await new Promise((resolve) => {
+      const probe = net.connect(port, '127.0.0.1')
+      probe.once('connect', () => { probe.destroy(); resolve(true) })
+      probe.once('error', () => resolve(false))
+    })
+    if (up) break
+    await sleep(100)
+  }
+
+  try {
+    const good = makePeer('room-a-peer', { server, workspace: 'room-a', token: 'key-a' })
+    writeTree(good.root, { 'a.txt': 'A' })
+    const okRes = await cliSync(good.state, { wait: 2 })
+    contains(okRes.out, '等待对端上线', '房间 A 用自己的密钥能连上（进入等待对端）', okRes.out)
+    ok(!okRes.out.includes('密钥与服务器不一致'), '没有报密钥错误')
+
+    const crossKey = makePeer('cross-key', { server, workspace: 'room-a', token: 'key-b' })
+    const crossRes = await cliSync(crossKey.state, { wait: 2 })
+    contains(crossRes.out, '密钥与服务器不一致', '拿房间 B 的密钥连房间 A → 401', crossRes.out)
+
+    const unlisted = makePeer('unlisted', { server, workspace: 'room-c', token: 'key-a' })
+    const unlistedRes = await cliSync(unlisted.state, { wait: 2 })
+    contains(unlistedRes.out, '密钥与服务器不一致', '未配置的房间且无全局密钥 → 拒绝（不允许空配置放行）', unlistedRes.out)
+  } finally {
+    relay.kill()
+    await sleep(300)
+    if (process.env.E2E_VERBOSE) console.log(relayOut)
+  }
 })
 
 /* ------------------------------------------------------------------ 4.2 删除熔断 */

@@ -48,18 +48,31 @@ echo "已安装到 $PREFIX/sync-server"
 
 # 3. 环境变量（只在缺失时创建，避免覆盖密钥）
 install -d -m 750 "$ETC"
-if [[ ! -f "$ETC/env" ]]; then
+# 房间密钥表：默认给一个 default 房间 + 随机密钥；不想要鉴权就删掉这个文件和 env 里的 SYNC_ROOMS
+if [[ ! -f "$ETC/rooms.json" ]]; then
     TOKEN="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
+    cat > "$ETC/rooms.json" <<EOF
+{
+  "default": "$TOKEN"
+}
+EOF
+    chmod 600 "$ETC/rooms.json"
+    chown "root:$SVC_USER" "$ETC/rooms.json"
+    echo "已生成房间密钥表 $ETC/rooms.json（房间 default + 随机密钥）"
+else
+    echo "沿用已有房间密钥表 $ETC/rooms.json（未改动）"
+fi
+
+if [[ ! -f "$ETC/env" ]]; then
     cat > "$ETC/env" <<EOF
-SYNC_TOKEN=$TOKEN
+SYNC_ROOMS=$ETC/rooms.json
 SYNC_ADDR=0.0.0.0:8443
 RUST_LOG=info
 EOF
     chmod 600 "$ETC/env"
     chown "root:$SVC_USER" "$ETC/env"
-    echo "已生成随机密钥，写入 $ETC/env"
 else
-    echo "沿用已有配置 $ETC/env（未改动密钥）"
+    echo "沿用已有配置 $ETC/env"
 fi
 
 # 4. systemd
@@ -73,9 +86,9 @@ systemctl --no-pager --lines=0 status sync-server || true
 echo
 echo "================ 部署完成 ================"
 echo "监听地址 : $(grep '^SYNC_ADDR=' "$ETC/env" | cut -d= -f2-)"
-echo "密钥     : $(grep '^SYNC_TOKEN=' "$ETC/env" | cut -d= -f2-)"
+echo "房间密钥 : $(grep -o '"default": *"[^"]*"' "$ETC/rooms.json" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
 echo
-echo "两台 Windows 客户端都填这个密钥，服务器地址填："
+echo "客户端填房间 default 与上面这把密钥，服务器地址填："
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo "  ws://${HOST_IP:-服务器IP}:8443/ws"
 echo

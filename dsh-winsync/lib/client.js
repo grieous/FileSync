@@ -114,6 +114,10 @@ window.__ModuleLoader__.load({
 .ws-table th.ws-col-idx,.ws-table td.ws-col-idx{width:40px;text-align:right;color:#8B8E94}
 /* 路径要能看全：不省略、允许在分隔符处换行，长路径自然折成两行。 */
 .ws-table td.ws-path{white-space:normal;word-break:break-all;min-width:240px;color:#C9CBCF}
+/* 密钥这类敏感字段：输入框 + 右侧「显示/隐藏」，按钮不抢输入框的宽度 */
+.ws-field-row{display:flex;align-items:center;gap:8px}
+.ws-field-row .ws-input{flex:1 1 auto;min-width:0}
+.ws-field-row .ws-btn{flex:0 0 auto;height:32px}
 .ws-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#A0A2A6}
 .ws-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0 12px}
 .ws-input,.ws-select{background:#1C1D1F;border:1px solid #2A2C2E;border-radius:6px;
@@ -1025,6 +1029,21 @@ window.__ModuleLoader__.load({
         maxMb: task.filter?.size_max ? task.filter.size_max / MB : 0,
       })
       const [busy, setBusy] = React.useState(false)
+      const [showToken, setShowToken] = React.useState(false)
+
+      // 密钥从不回传到 /state（那里只有 has_token），只有点「显示」时才按需取一次。
+      const revealToken = async () => {
+        const next = !showToken
+        if (next && form.token === '' && task.has_token) {
+          try {
+            const body = await api(`/tasks/${encodeURIComponent(task.id)}/token`)
+            setForm((prev) => ({ ...prev, token: body.token ?? '' }))
+          } catch (e) {
+            store.notify(e.message, 'bad')
+          }
+        }
+        setShowToken(next)
+      }
 
       const body = (force) => ({
         name: form.name,
@@ -1103,10 +1122,32 @@ window.__ModuleLoader__.load({
               hint: `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}`,
               preview: `将连接 ${normalizeServer(form.server) || '（待填写）'}`,
             }),
-            input('密钥', 'token', {
-              type: 'password',
-              placeholder: task.has_token ? '已设置（留空表示不修改）' : '未设置',
-            }),
+            h(
+              'div',
+              { className: 'ws-field' },
+              h('label', null, '房间密钥（可选）'),
+              h(
+                'div',
+                { className: 'ws-field-row' },
+                h('input', {
+                  className: 'ws-input',
+                  type: showToken ? 'text' : 'password',
+                  value: form.token,
+                  placeholder: task.has_token ? '已设置（留空表示不修改）' : '可选',
+                  onChange: (e) => setForm({ ...form, token: e.target.value }),
+                }),
+                h(
+                  'button',
+                  { type: 'button', className: 'ws-btn', onClick: () => void revealToken() },
+                  showToken ? '隐藏' : '显示',
+                ),
+              ),
+              h(
+                'div',
+                { className: 'ws-hint' },
+                '中继默认纯隧道，可留空；配了房间密钥时填这一间房的那把。点「显示」可回看已保存的值',
+              ),
+            ),
             input('房间名', 'workspace', { hint: '两台设备必须相同' }),
             input('本机目录', 'root', { hint: '绝对路径；目录不存在会自动创建' }),
             h(
@@ -1168,6 +1209,7 @@ window.__ModuleLoader__.load({
     function Wizard({ onClose, store }) {
       const [step, setStep] = React.useState(0)
       const [busy, setBusy] = React.useState(false)
+      const [showToken, setShowToken] = React.useState(false)
       const [form, setForm] = React.useState({
         server: '',
         token: '',
@@ -1184,7 +1226,6 @@ window.__ModuleLoader__.load({
       if (!/^wss?:\/\/[^\s/]+/.test(normalizeServer(form.server))) {
         issues.push('只填服务器 IP 或 IP:端口即可')
       }
-      if (!form.token.trim()) issues.push('未填写密钥')
       if (!form.workspace.trim()) issues.push('未填写房间名')
       if (step >= 1) {
         if (!form.root.trim()) issues.push('未选择同步目录')
@@ -1269,14 +1310,27 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-field' },
-              h('label', null, '密钥'),
-              h('input', {
-                className: 'ws-input',
-                type: 'password',
-                value: form.token,
-                onChange: (e) => setForm({ ...form, token: e.target.value }),
-              }),
-              h('div', { className: 'ws-hint' }, '与服务端的 SYNC_TOKEN 完全一致'),
+              h('label', null, '房间密钥（可选）'),
+              h(
+                'div',
+                { className: 'ws-field-row' },
+                h('input', {
+                  className: 'ws-input',
+                  type: showToken ? 'text' : 'password',
+                  value: form.token,
+                  onChange: (e) => setForm({ ...form, token: e.target.value }),
+                }),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'ws-btn',
+                    onClick: () => setShowToken((v) => !v),
+                  },
+                  showToken ? '隐藏' : '显示',
+                ),
+              ),
+              h('div', { className: 'ws-hint' }, '中继默认是纯隧道，不用填；中继配了房间密钥时，填这一间房的那把'),
             ),
             h(
               'div',

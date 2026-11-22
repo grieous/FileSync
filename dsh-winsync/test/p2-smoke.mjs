@@ -164,6 +164,18 @@ assert.equal(forced.status, 200, JSON.stringify(forced.body))
 assert.ok(fs.statSync(movedRoot).isDirectory(), '保存新目录时也应自动创建')
 console.log('PASS 改目录（force）时自动创建不存在的目录')
 
+/* ---- 密钥：/state 里只有 has_token，明文要单独按需取 ---- */
+
+const tokenRes = await call(`/tasks/${taskId}/token`)
+assert.equal(tokenRes.status, 200, JSON.stringify(tokenRes.body))
+assert.equal(tokenRes.body.token, 'p2-token')
+const freshState = await call('/state')
+assert.ok(
+  !JSON.stringify(freshState.body).includes('p2-token'),
+  '/state 不应带密钥明文，否则每次状态广播都把它带进内存快照',
+)
+console.log('PASS 密钥可单独读取，/state 不含明文')
+
 const badRoot = await call(`/tasks/${taskId}`, {
   method: 'PATCH',
   body: JSON.stringify({ root: path.join(root, 'nope') }),

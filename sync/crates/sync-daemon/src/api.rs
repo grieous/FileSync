@@ -91,6 +91,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/tasks/:id",
             axum::routing::patch(patch_task).delete(delete_task),
         )
+        .route("/api/tasks/:id/token", get(get_task_token))
         .route("/api/tasks/:id/sync", post(sync_now))
         .route("/api/tasks/:id/pause", post(pause_task))
         .route("/api/tasks/:id/resume", post(resume_task))
@@ -415,6 +416,18 @@ async fn delete_task(State(state): State<Arc<AppState>>, Path(id): Path<String>)
     crate::state::log_line(&format!("已删除任务 {name}（状态库保留）"));
     state.emit(Event::State);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// 把已保存的密钥原样返回，给界面的「显示」按钮用。
+///
+/// 只有拿到 Bearer 的调用方能访问（和写操作同一套鉴权，且只监听 127.0.0.1）。
+/// `/api/state` 里永远只有 `has_token`，避免每次状态广播都把密钥带进内存快照。
+async fn get_task_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResult {
+    let inner = state.inner.lock().map_err(|_| lock_err())?;
+    let task = inner
+        .task(&id)
+        .ok_or_else(|| ApiError::not_found("任务不存在"))?;
+    Ok(Json(json!({ "ok": true, "token": task.token })))
 }
 
 async fn sync_now(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResult {
