@@ -70,6 +70,19 @@ struct RateState {
     bytes: u64,
 }
 
+/// 按 KB/s 折算「这些字节本应花多久」。
+///
+/// 限速单位是 **KB/s**（`Settings::limit_*_kbps` 的字段名沿用历史叫法，界面也写 KB/s），
+/// 换成秒是 `bytes / (kbps * 1024)`。早先写成 `bytes * 8 / (kbps * 1024)`，
+/// 相当于把 KB/s 当成 kbit/s，实际速度只有标称值的 1/8——
+/// 256 KB/s 传 1.5 MB 要 48 秒而不是 6 秒。
+fn seconds_for(bytes: u64, kbps: u32) -> f64 {
+    if kbps == 0 {
+        return 0.0;
+    }
+    bytes as f64 / (kbps as f64 * 1024.0)
+}
+
 async fn throttle(st: &mut RateState, n: usize, kbps: u32) {
     if kbps == 0 {
         return;
@@ -77,7 +90,7 @@ async fn throttle(st: &mut RateState, n: usize, kbps: u32) {
     let now = std::time::Instant::now();
     let start = *st.start.get_or_insert(now);
     st.bytes += n as u64;
-    let target = st.bytes as f64 * 8.0 / (kbps as f64 * 1024.0);
+    let target = seconds_for(st.bytes, kbps);
     let elapsed = now.duration_since(start).as_secs_f64();
     if target > elapsed {
         tokio::time::sleep(std::time::Duration::from_secs_f64(target - elapsed)).await;
@@ -918,4 +931,21 @@ pub async fn run(
     }
 
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seconds_for;
+
+    #[test]
+    fn throttle_uses_kilobytes_per_second() {
+        // 64 KB/s 传 2 MB ≈ 32 秒；写成 kbit/s 会得到 256 秒。
+        let secs = seconds_for(2 * 1024 * 1024, 64);
+        assert!((secs - 32.0).abs() < 0.001, "应约 32 秒，实际 {secs}");
+    }
+
+    #[test]
+    fn throttle_zero_means_unlimited() {
+        assert_eq!(seconds_for(10 * 1024 * 1024, 0), 0.0);
+    }
 }

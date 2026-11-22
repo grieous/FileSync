@@ -108,12 +108,26 @@ dsh plugin --profile desktop install --force
 | `winsync_sync_now` | **有**（可能传播删除） | 默认只返回「已开始」；`wait=true` 等到结束 |
 | `winsync_recent_activity` | 无 | 最近的文件级记录 |
 
+## 排障
+
+| 现象 | 先查什么 | 处理 |
+|---|---|---|
+| 左侧栏没有「同步」 | `dsh plugin --profile <p> list` 里有没有 `dsh-winsync`；浏览器 console 有没有模块加载错误 | 少东西就重装：删 `~/.dsh/profiles/<p>/node_modules/dsh-winsync` 再 `dsh plugin --profile <p> install --force` |
+| 面板打开是「同步服务不可用」 | 面板「设置 → 诊断」里的 `daemon` 段；`%LOCALAPPDATA%\dsh-winsync\daemon.json` 是否存在 | 点「重试」；仍失败就看 daemon 日志（`<state>\logs\`） |
+| 提示 `daemon-missing` | `<state>\bin\winsync-daemon.exe`、`Program Files\WinSync\`、`PATH` | `cargo build -p sync-daemon --release` 后把 exe 放进 `<state>\bin\`，或在设置里填绝对路径 |
+| 改了界面却不生效 | 是不是只 `pnpm install` 没重启 dsh | 客户端 bundle 在页面加载时注入，**必须重启 dsh**；重装前记得删旧的 `node_modules/dsh-winsync`（pnpm 会硬链旧快照） |
+| 进了同步页退不出来 | 左下角 `← 返回 dsh`；或直接点 dsh 侧栏里的会话 | 两者都调 `layout.selectPanel(null)`；宿主版本太旧没有 `layout` 服务时按钮不渲染 |
+| 同步「看着很慢」 | 设置里的限速是不是非 0 | 1.5 MB @ 256 KB/s 实测 6.6 秒。旧版本把 KB/s 当 kbit/s，慢 8 倍，见 `sync/README.md` |
+
 ## 测试
 
 ```bash
-node test/client-smoke.mjs   # 客户端注册契约（main 面板 + 左栏行）
+node test/client-smoke.mjs   # 客户端注册契约（main 面板 + 左栏行 + 返回对话出口）
 node test/p2-smoke.mjs       # 宿主：路由、代理、CRUD 透传、SSE、工具、卸载清理、/diag 脱敏
 node test/cdp-inspect.mjs <url> [port] [--aria=同步]   # 真实页面里的渲染与截图
+
+# 同步本体（双端、安全阀、限速、与 exe 的隔离）在仓库根的 sync/tools/
+node ../sync/tools/e2e.mjs   # 76 项断言：真 relay + 两个真对端，约 25 秒
 
 # 分步视觉走查（需要先起一个实例）：空态→向导三步→任务卡→日志→设置→窄态
 CDP_SIZE=1440,960 node test/cdp-p3.mjs "<url>" [port]   # 截图落在 test/shots/
