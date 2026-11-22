@@ -118,6 +118,11 @@ window.__ModuleLoader__.load({
 .ws-field-row{display:flex;align-items:center;gap:8px}
 .ws-field-row .ws-input{flex:1 1 auto;min-width:0}
 .ws-field-row .ws-btn{flex:0 0 auto;height:32px}
+/* 向导第一步的两个入口：加入 / 创建，别再让人猜 */
+.ws-tabs{display:flex;gap:6px;margin-bottom:12px}
+.ws-tab{flex:1 1 0;height:32px;border:1px solid #2A2C2E;background:#1C1D1F;color:#A0A2A6;
+  border-radius:6px;font:inherit;font-size:12px;cursor:pointer}
+.ws-tab[data-active="true"]{background:#1E355C;border-color:#2B6CF6;color:#EDEDEE}
 .ws-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#A0A2A6}
 .ws-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0 12px}
 .ws-input,.ws-select{background:#1C1D1F;border:1px solid #2A2C2E;border-radius:6px;
@@ -1279,13 +1284,23 @@ window.__ModuleLoader__.load({
     function Wizard({ onClose, store }) {
       const [step, setStep] = React.useState(0)
       const [busy, setBusy] = React.useState(false)
-      const [showToken, setShowToken] = React.useState(false)
+      const [entry, setEntry] = React.useState('create')
+      const copyInvite = async () => {
+        const text = inviteOf(form.server, form.workspace)
+        try {
+          await navigator.clipboard.writeText(text)
+          store.notify('邀请已复制，发给对方即可', 'ok')
+        } catch {
+          store.notify(`复制失败，可手动复制：${text}`, 'bad')
+        }
+      }
       const [form, setForm] = React.useState({
         server: '',
         token: '',
         // 默认就生成一个随机房间码：不用再想名字，也不用去中继登记
         workspace: newRoomCode(),
         pair: '',
+        joinText: '',
         root: '',
         name: '',
         mode: 'bidirectional',
@@ -1355,114 +1370,205 @@ window.__ModuleLoader__.load({
 
       const body = () => {
         if (step === 0) {
+          const invite = parseInvite(form.joinText)
+          const joinRoom = invite
+            ? invite.room
+            : /^\d{6}$/.test(form.joinText.trim())
+              ? pairRoom(form.joinText)
+              : ''
+          const joinServer = invite ? invite.server : form.server
           return h(
             'div',
             null,
             h(
               'div',
-              { className: 'ws-field' },
-              h('label', null, '服务器地址'),
-              h('input', {
-                className: 'ws-input',
-                value: form.server,
-                placeholder: '192.168.3.222 或 192.168.3.222:18443',
-                onChange: (e) => {
-                  const text = e.target.value
-                  // 直接粘贴对方的邀请串：服务器 + 房间码一次填完
-                  const invite = parseInvite(text)
-                  if (invite) setForm({ ...form, server: invite.server, workspace: invite.room })
-                  else setForm({ ...form, server: text })
+              { className: 'ws-tabs' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'ws-tab',
+                  'data-active': entry === 'join' ? 'true' : 'false',
+                  onClick: () => setEntry('join'),
                 },
-              }),
-              h(
-                'div',
-                { className: 'ws-hint' },
-                `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}；协议头与 /ws 会自动补上`,
+                '加入已有同步',
               ),
               h(
-                'div',
-                { className: 'ws-hint ws-mono' },
-                `将连接 ${normalizeServer(form.server) || '（待填写）'}`,
-              ),
-              h(
-                'div',
-                { className: 'ws-hint' },
-                '也可以直接粘贴对方给你的邀请串（ws://ip:port/ws#房间码），会一次填好',
+                'button',
+                {
+                  type: 'button',
+                  className: 'ws-tab',
+                  'data-active': entry === 'create' ? 'true' : 'false',
+                  onClick: () => setEntry('create'),
+                },
+                '创建新同步',
               ),
             ),
-            h(
-              'div',
-              { className: 'ws-field' },
-              h('label', null, '房间码'),
-              h(
-                'div',
-                { className: 'ws-field-row' },
-                h('input', {
-                  className: 'ws-input',
-                  value: form.workspace,
-                  onChange: (e) => setForm({ ...form, workspace: e.target.value }),
-                }),
-                h(
-                  'button',
-                  { type: 'button', className: 'ws-btn', onClick: () => void copyInvite() },
-                  '复制邀请',
-                ),
-              ),
-              h(
-                'div',
-                { className: 'ws-hint' },
-                '随机生成，双方填同一个；对方粘邀请串就不用填这一项',
-              ),
-              h(
-                'div',
-                { className: 'ws-field-row', style: { marginTop: 6 } },
-                h('input', {
-                  className: 'ws-input',
-                  placeholder: '6 位配对码（可选）',
-                  value: form.pair,
-                  maxLength: 6,
-                  inputMode: 'numeric',
-                  onChange: (e) => setForm({ ...form, pair: e.target.value.replace(/\D/g, '').slice(0, 6) }),
-                }),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'ws-btn',
-                    onClick: () => {
-                      const code = newPairCode()
-                      setForm({ ...form, pair: code, workspace: pairRoom(code) })
-                    },
-                  },
-                  '生成',
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'ws-btn',
-                    onClick: () => {
-                      const room = pairRoom(form.pair)
-                      if (!room) return store.notify('配对码要 6 位数字', 'bad')
-                      setForm({ ...form, workspace: room })
-                    },
-                  },
-                  '使用',
-                ),
-              ),
-              form.workspace.startsWith('pair-')
-                ? h(
+            entry === 'join'
+              ? h(
+                  'div',
+                  null,
+                  h(
                     'div',
-                    { className: 'ws-hint' },
-                    `校验码 ${verifyCode(form.workspace)}：两端显示的数必须一样，对上了再继续`,
-                  )
-                : null,
-              h(
-                'div',
-                { className: 'ws-hint ws-mono' },
-                form.server.trim() ? inviteOf(form.server, form.workspace) : '（填写服务器地址后生成邀请串）',
-              ),
-            ),
+                    { className: 'ws-hint', style: { marginBottom: 10 } },
+                    '让对方在任务卡上点「复制邀请」，把整串发给你，粘到下面即可；如果对方只给了 6 位配对码，再补上服务器地址。',
+                  ),
+                  h(
+                    'div',
+                    { className: 'ws-field' },
+                    h('label', null, '邀请串或配对码'),
+                    h('input', {
+                      className: 'ws-input',
+                      placeholder: 'ws://192.168.3.222:18443/ws#pair-123456 或 123456',
+                      value: form.joinText,
+                      onChange: (e) => {
+                        const text = e.target.value
+                        const inv = parseInvite(text)
+                        if (inv) setForm({ ...form, joinText: text, server: inv.server, workspace: inv.room })
+                        else if (/^\d{6}$/.test(text.trim())) {
+                          setForm({ ...form, joinText: text, workspace: pairRoom(text) })
+                        } else setForm({ ...form, joinText: text })
+                      },
+                    }),
+                    h('div', { className: 'ws-hint' }, '粘邀请串会自动带出服务器地址与房间码'),
+                  ),
+                  h(
+                    'div',
+                    { className: 'ws-field' },
+                    h('label', null, '服务器地址'),
+                    h('input', {
+                      className: 'ws-input',
+                      value: form.server,
+                      placeholder: '192.168.3.222 或 192.168.3.222:18443',
+                      onChange: (e) => setForm({ ...form, server: e.target.value }),
+                    }),
+                    h('div', { className: 'ws-hint' }, '默认端口 8443；对方用的是别的端口就写全，例如 :18443'),
+                  ),
+                  joinRoom
+                    ? h(
+                        'div',
+                        { className: 'ws-card', style: { marginTop: 4 } },
+                        h(
+                          'div',
+                          null,
+                          `将加入 ${shortServer(normalizeServer(joinServer)) || '（待填服务器）'} 的房间 ${joinRoom}`,
+                        ),
+                        joinRoom.startsWith('pair-')
+                          ? h(
+                              'div',
+                              { className: 'ws-hint', style: { marginTop: 4 } },
+                              `校验码 ${verifyCode(joinRoom)}：和对方屏幕上显示的 4 位数一致才继续`,
+                            )
+                          : null,
+                      )
+                    : h(
+                        'div',
+                        { className: 'ws-hint' },
+                        '还没识别到房间：粘贴整串邀请，或输入对方的 6 位配对码',
+                      ),
+                )
+              : h(
+                  'div',
+                  null,
+                  h(
+                    'div',
+                    { className: 'ws-field' },
+                    h('label', null, '服务器地址'),
+                    h('input', {
+                      className: 'ws-input',
+                      value: form.server,
+                      placeholder: '192.168.3.222 或 192.168.3.222:18443',
+                      onChange: (e) => {
+                        const text = e.target.value
+                        const inv = parseInvite(text)
+                        if (inv) setForm({ ...form, server: inv.server, workspace: inv.room })
+                        else setForm({ ...form, server: text })
+                      },
+                    }),
+                    h(
+                      'div',
+                      { className: 'ws-hint' },
+                      `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}；协议头与 /ws 会自动补上`,
+                    ),
+                    h(
+                      'div',
+                      { className: 'ws-hint ws-mono' },
+                      `将连接 ${normalizeServer(form.server) || '（待填写）'}`,
+                    ),
+                  ),
+                  h(
+                    'div',
+                    { className: 'ws-field' },
+                    h('label', null, '房间码'),
+                    h(
+                      'div',
+                      { className: 'ws-field-row' },
+                      h('input', {
+                        className: 'ws-input',
+                        value: form.workspace,
+                        onChange: (e) => setForm({ ...form, workspace: e.target.value }),
+                      }),
+                      h(
+                        'button',
+                        { type: 'button', className: 'ws-btn', onClick: () => void copyInvite() },
+                        '复制邀请',
+                      ),
+                    ),
+                    h('div', { className: 'ws-hint' }, '自动生成的随机码；对方用它配对，不用去中继登记'),
+                  ),
+                  h(
+                    'div',
+                    { className: 'ws-field-row', style: { marginTop: 6 } },
+                    h('input', {
+                      className: 'ws-input',
+                      placeholder: '6 位配对码（可选，口头告诉对方）',
+                      value: form.pair,
+                      maxLength: 6,
+                      inputMode: 'numeric',
+                      onChange: (e) =>
+                        setForm({ ...form, pair: e.target.value.replace(/\D/g, '').slice(0, 6) }),
+                    }),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'ws-btn',
+                        onClick: () => {
+                          const code = newPairCode()
+                          setForm({ ...form, pair: code, workspace: pairRoom(code) })
+                        },
+                      },
+                      '生成',
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'ws-btn',
+                        onClick: () => {
+                          const room = pairRoom(form.pair)
+                          if (!room) return store.notify('配对码要 6 位数字', 'bad')
+                          setForm({ ...form, workspace: room })
+                        },
+                      },
+                      '使用',
+                    ),
+                  ),
+                  form.workspace.startsWith('pair-')
+                    ? h(
+                        'div',
+                        { className: 'ws-hint' },
+                        `校验码 ${verifyCode(form.workspace)}：两端显示的数必须一样，对上了再继续`,
+                      )
+                    : null,
+                  h(
+                    'div',
+                    { className: 'ws-hint ws-mono' },
+                    form.server.trim()
+                      ? inviteOf(form.server, form.workspace)
+                      : '（填写服务器地址后生成邀请串）',
+                  ),
+                ),
           )
         }
         if (step === 1) {
