@@ -64,16 +64,17 @@ Windows 上交叉编译到 Linux 需要 WSL 或 Docker。**本机这两者目前
 ```bash
 cd sync
 docker build -f deploy/Dockerfile -t winsync-relay .
-# 纯隧道（不做鉴权，只适合内网 / VPN 后面）
-docker run -d --name winsync-relay \
-  -p 8443:8443 \
-  --restart=always \
-  winsync-relay
-
-# 房间级密钥：每个房间一把，互不影响
+# 房间级密钥：每个房间一把，互不影响（必须配，否则容器直接退出）
 docker run -d --name winsync-relay \
   -p 8443:8443 \
   -e SYNC_ROOM_TOKENS='{"office":"密钥A","family":"密钥B"}' \
+  --restart=always \
+  winsync-relay
+
+# 想给所有房间一个兜底密钥就用 *
+docker run -d --name winsync-relay \
+  -p 8443:8443 \
+  -e SYNC_ROOM_TOKENS='{"*":"统一密钥"}' \
   --restart=always \
   winsync-relay
 ```

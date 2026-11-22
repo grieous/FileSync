@@ -62,15 +62,15 @@ struct AppState {
     next_id: Arc<AtomicU64>,
 }
 
-/// 房间级密钥表（可选）。
+/// 房间级密钥表（必需）。
 ///
-/// 中继本身只做隧道：配对 + 转发，不存任何数据。密钥是**可选的**一层门禁：
-///   - 配了：`SYNC_ROOMS=/etc/sync/rooms.json`，内容 `{"office":"tokenA","family":"tokenB"}`
-///     或 `SYNC_ROOM_TOKENS='{"office":"tokenA"}'`（容器里不方便挂文件时）。
-///     此时**每个**房间都必须能查到密钥，查不到的一律拒绝，避免「配了一半」变成敞口。
-///   - 没配：纯隧道模式，任何房间都放行（适合整台中继放在内网 / VPN 后面）。
+/// 中继本身只做隧道：配对 + 转发，不存任何数据；但**每间房必须有密钥**：
+///   - `SYNC_ROOMS=/etc/sync/rooms.json`，内容 `{"office":"tokenA","family":"tokenB"}`
+///   - 或 `SYNC_ROOM_TOKENS='{"office":"tokenA"}'`（容器里不方便挂文件时）
+///   - 表里可以用 `"*"` 给所有房间一个兜底密钥：`{"*":"tokenA","vip":"tokenB"}`
 ///
-/// 文件改了不用重启，按 mtime 自动重读。
+/// 没配表就不启动——不允许「谁都能进」的裸跑。查不到密钥的房间一律 401，
+/// 避免「配了一半」变成敞口。文件改了不用重启，按 mtime 自动重读。
 #[derive(Default)]
 struct RoomKeys {
     path: Option<PathBuf>,
@@ -110,7 +110,11 @@ impl RoomKeys {
         }
     }
 
-    /// 返回该房间的专属密钥；没配置返回 None。
+    fn debug_room_count(&self) -> usize {
+        self.read_map().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// 返回该房间的密钥（精确优先，其次 `*` 兜底）；没有返回 None。
     fn for_room(&mut self, room: &str) -> Option<String> {
         let mtime = self
             .path
@@ -125,9 +129,10 @@ impl RoomKeys {
             let map = self.read_map().unwrap_or_default();
             self.cache = Some((mtime, map));
         }
-        self.cache
-            .as_ref()
-            .and_then(|(_, map)| map.get(room).cloned())
+        let map = self.cache.as_ref().map(|(_, map)| map)?;
+        map.get(room)
+            .or_else(|| map.get("*"))
+            .cloned()
             .filter(|t| !t.is_empty())
     }
 }
@@ -142,14 +147,14 @@ async fn main() {
         .init();
 
     let room_keys = RoomKeys::from_env();
-    if room_keys.configured() {
-        tracing::info!("已启用房间级密钥：每个房间用各自的密钥，查不到房间的密钥就拒绝");
-    } else {
-        tracing::warn!(
-            "未配置 SYNC_ROOMS / SYNC_ROOM_TOKENS：按纯隧道运行，不做鉴权。\
-             只应在内网或 VPN 后面这么部署"
+    if !room_keys.configured() {
+        tracing::error!(
+            "未配置房间密钥：请设置 SYNC_ROOMS=<rooms.json> 或 SYNC_ROOM_TOKENS='{{\"*\":\"密钥\"}}' 后重启"
         );
+        std::process::exit(2);
     }
+    let key_count = room_keys.debug_room_count();
+    tracing::info!("已启用房间级密钥（{key_count} 条，含 \"*\" 兜底）：密钥不对或房间没配都会拒绝");
     let addr = std::env::var("SYNC_ADDR").unwrap_or_else(|_| "0.0.0.0:8443".to_string());
 
     let state = AppState {

@@ -1125,7 +1125,7 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-field' },
-              h('label', null, '房间密钥（可选）'),
+              h('label', null, '密钥'),
               h(
                 'div',
                 { className: 'ws-field-row' },
@@ -1133,7 +1133,7 @@ window.__ModuleLoader__.load({
                   className: 'ws-input',
                   type: showToken ? 'text' : 'password',
                   value: form.token,
-                  placeholder: task.has_token ? '已设置（留空表示不修改）' : '可选',
+                  placeholder: task.has_token ? '已设置（留空表示不修改）' : '必填',
                   onChange: (e) => setForm({ ...form, token: e.target.value }),
                 }),
                 h(
@@ -1145,7 +1145,7 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'ws-hint' },
-                '中继默认纯隧道，可留空；配了房间密钥时填这一间房的那把。点「显示」可回看已保存的值',
+                '中继为这个房间配的密钥；留空表示不修改，点「显示」可回看已保存的值',
               ),
             ),
             input('房间名', 'workspace', { hint: '两台设备必须相同' }),
@@ -1222,6 +1222,7 @@ window.__ModuleLoader__.load({
       })
 
       const issues = []
+      if (!form.token.trim()) issues.push('未填写密钥')
       // 只校验「补全之后」是不是一个合法地址，用户不需要关心 ws:// 和 /ws。
       if (!/^wss?:\/\/[^\s/]+/.test(normalizeServer(form.server))) {
         issues.push('只填服务器 IP 或 IP:端口即可')
@@ -1310,7 +1311,7 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-field' },
-              h('label', null, '房间密钥（可选）'),
+              h('label', null, '密钥'),
               h(
                 'div',
                 { className: 'ws-field-row' },
@@ -1330,7 +1331,11 @@ window.__ModuleLoader__.load({
                   showToken ? '隐藏' : '显示',
                 ),
               ),
-              h('div', { className: 'ws-hint' }, '中继默认是纯隧道，不用填；中继配了房间密钥时，填这一间房的那把'),
+              h(
+                'div',
+                { className: 'ws-hint' },
+                '中继为这个房间配的密钥（rooms.json 里对应那条；中继没配就起不来）',
+              ),
             ),
             h(
               'div',

@@ -367,7 +367,7 @@ scenario('filter-mismatch', async (ctx) => {
 /* ------------------------------------------------------------------ 4.2 房间级密钥 */
 
 scenario('room-keys', async (ctx) => {
-  // 这条自己起一个中继：只配置房间密钥，不给全局 SYNC_TOKEN。
+  // 这条自己起一个中继：只给 room-a / room-b 配密钥，用来验证跨房间被拒。
   const roomsFile = path.join(WORK, current.name, 'rooms.json')
   fs.mkdirSync(path.dirname(roomsFile), { recursive: true })
   fs.writeFileSync(roomsFile, JSON.stringify({ 'room-a': 'key-a', 'room-b': 'key-b' }))
@@ -785,7 +785,13 @@ async function main() {
   const port = await freePort()
   const server = `ws://127.0.0.1:${port}/ws`
   const relay = spawn(RELAY, [], {
-    env: { ...process.env, SYNC_TOKEN: TOKEN, SYNC_ADDR: `127.0.0.1:${port}`, RUST_LOG: 'warn' },
+    // 中继现在必须配密钥：`*` 给所有房间一个兜底，各场景不必逐个列房间名
+    env: {
+      ...process.env,
+      SYNC_ROOM_TOKENS: JSON.stringify({ '*': TOKEN }),
+      SYNC_ADDR: `127.0.0.1:${port}`,
+      RUST_LOG: 'warn',
+    },
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })

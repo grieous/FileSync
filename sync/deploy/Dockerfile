@@ -26,8 +26,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/sync-proto ./crates/sync-proto
 COPY crates/sync-server ./crates/sync-server
 
-# 移除 workspace 里跟服务端无关的成员（sync-core / sync-client）
-RUN sed -i '/sync-core/d; /sync-client/d' Cargo.toml \
+# 移除 workspace 里跟服务端无关的成员（core / client / daemon 都不进来，省依赖）
+RUN sed -i '/sync-core/d; /sync-client/d; /sync-daemon/d' Cargo.toml \
  && cat Cargo.toml
 
 RUN cargo build --release -p sync-server
