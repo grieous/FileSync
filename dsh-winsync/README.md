@@ -18,6 +18,34 @@ daemon 启动任务前只读地看一眼 exe 的配置，命中就拒绝，返�
 
 ## 安装
 
+### 装 tgz（推荐，自带 daemon）
+
+```bash
+dsh plugin --profile desktop add file:C:\path\to\dsh-winsync-0.5.2.tgz
+```
+
+包内带的是 **`bin/winsync-daemon.exe.gz`**（6.2 MB 的 PE32+ x86-64，压完 2.8 MB），不是裸 exe。
+首次启动时展开到 `%LOCALAPPDATA%\dsh-winsync\bin\winsync-daemon.exe`，之后 daemon 一直在那儿跑。
+
+> 为什么不直接把 exe 塞进 `node_modules`：pnpm 覆盖安装是「删掉旧目录再重链」，而**正在运行的
+> daemon 会占住那个 exe**，删不掉就报
+> `[ERR_PNPM_EPERM] importPackage ... dsh-winsync_tmp_<pid>_<n>\bin`。
+> 运行点挪到状态目录后，`node_modules` 里只剩一个数据文件，覆盖安装退化成普通文件替换；
+> 顺带也不会被杀软按「可执行文件写入 node_modules」拦下来。
+
+**从 0.5.1 及更早覆盖安装的这一次**，旧包里的裸 exe 可能还占着，要先清一次：
+
+```powershell
+Get-Process winsync-daemon -ErrorAction SilentlyContinue | Stop-Process -Force
+Remove-Item -Recurse -Force "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-winsync" -ErrorAction SilentlyContinue
+Get-ChildItem "$env:USERPROFILE\.dsh\profiles\desktop\node_modules" -Filter "dsh-winsync_tmp_*" -Directory |
+  Remove-Item -Recurse -Force
+```
+
+装完重启 dsh，左侧栏出现「文件同步」。
+
+### 指向仓库目录（开发用）
+
 ```bash
 # 1. 守护进程（release 更划算：同步循环是 CPU/IO 密型）
 cd ../sync && cargo build --release -p sync-daemon
@@ -43,10 +71,16 @@ dsh plugin --profile desktop install --force
 
 1. `<state>\plugin.json` 的 `binPath`
 2. 环境变量 `WINSYNC_DAEMON_BIN`
-3. `<state>\bin\winsync-daemon.exe`（推荐，插件自有目录）
-4. `%LOCALAPPDATA%\Programs\WinSync\winsync-daemon.exe`
-5. `PATH` 里的 `winsync-daemon.exe`
-6. 仓库开发产物 `sync/target/debug|release/sync-daemon.exe`
+3. **包内种子 `bin\winsync-daemon.exe.gz`** → 展开到 `<state>\bin\winsync-daemon.exe` 再运行
+4. 包内裸 `bin\winsync-daemon.exe`（自制包/手工塞进去的，直接跑，不做种子）
+5. `<state>\bin\winsync-daemon.exe`（手工安装位，也是种子展开的目标）
+6. `%LOCALAPPDATA%\Programs\WinSync\winsync-daemon.exe`
+7. `PATH` 里的 `winsync-daemon.exe`
+8. 仓库开发产物 `sync/target/debug|release/sync-daemon.exe`
+
+1、2 是显式指定，优先级最高，也**不触发种子展开**（测试与自制构建靠这个）。
+种子按 sha256 判断要不要重展开：同一份只解压一次，换了包才覆盖；覆盖失败（旧副本正在跑）
+就继续用旧副本，并在 `/diag` 的 `daemon.seed` 里标出 `error`，不会因此起不来。
 
 都没有时接口返回 `daemon-missing`，界面会给出提示。
 
@@ -90,14 +124,18 @@ dsh plugin --profile desktop install --force
 
 ## 打包
 
-改完插件代码后出一份 tgz（产物在仓库根目录，`dsh-winsync-<version>.tgz`）：
+改完插件代码后出一份 tgz（产物落在 `dist/dsh-winsync-<version>.tgz`）：
 
 ```bash
-npm run pack:tgz
+npm run pack
 ```
 
 版本号按 patch 递增；安装到别的机器用 `dsh plugin --profile <名> add <tgz 路径>`。
-tgz **内嵌** `bin/winsync-daemon.exe`（压缩后约 2.9 MB），所以只装插件就能用；
+
+打包脚本会做三件额外的事：把 `bin/winsync-daemon.exe` 压成 `bin/winsync-daemon.exe.gz` 放进包
+（tgz 约 2.8 MB）、**解压回读校验 sha256**、并**拒绝任何裸 exe 进包**——裸 exe 就是
+`ERR_PNPM_EPERM` 的来源，缺文件或体积异常也直接失败，不会产出一个装完才发现少东西的包。
+
 如果偏好里设了 `binPath` 或环境变量 `WINSYNC_DAEMON_BIN`，会优先用那些。
 
 ## 偏好
@@ -141,9 +179,11 @@ tgz **内嵌** `bin/winsync-daemon.exe`（压缩后约 2.9 MB），所以只装�
 
 | 现象 | 先查什么 | 处理 |
 |---|---|---|
+| 覆盖安装报 `ERR_PNPM_EPERM … dsh-winsync_tmp_<pid>_<n>\bin` | daemon 是不是正在从 `node_modules\dsh-winsync\bin` 里跑（`Get-Process winsync-daemon`），或杀软在拦 `node_modules` 里的 exe | 0.5.2 起运行点是 `<state>\bin`，新装不会再犯。从 0.5.1 及更早升级的这一次先退 dsh、`Stop-Process -Name winsync-daemon -Force`、删掉旧 `node_modules\dsh-winsync`（含 `dsh-winsync_tmp_*`）再装 |
 | 左侧栏没有「同步」 | `dsh plugin --profile <p> list` 里有没有 `dsh-winsync`；浏览器 console 有没有模块加载错误 | 少东西就重装：删 `~/.dsh/profiles/<p>/node_modules/dsh-winsync` 再 `dsh plugin --profile <p> install --force` |
 | 面板打开是「同步服务不可用」 | 面板「设置 → 诊断」里的 `daemon` 段；`%LOCALAPPDATA%\dsh-winsync\daemon.json` 是否存在 | 点「重试」；仍失败就看 daemon 日志（`<state>\logs\`） |
-| 提示 `daemon-missing` | `<state>\bin\winsync-daemon.exe`、`Program Files\WinSync\`、`PATH` | `cargo build -p sync-daemon --release` 后把 exe 放进 `<state>\bin\`，或在设置里填绝对路径 |
+| 提示 `daemon-missing` | 诊断里的 `daemon.seed`、包内 `bin\winsync-daemon.exe.gz`、`<state>\bin\`、`Program Files\WinSync\`、`PATH` | `cargo build -p sync-daemon --release` 后把 exe 放进 `<state>\bin\`，或重新 `npm run pack` 打一个自带种子的包，或在设置里填绝对路径 |
+| 诊断里 `daemon.seed.error` 是 `EBUSY`/`EPERM` | 状态目录里的旧 exe 正在跑，种子换不上去 | 正常（沿用旧副本）；要让新 exe 生效就退 dsh 再启动一次 |
 | 改了界面却不生效 | 是不是只 `pnpm install` 没重启 dsh | 客户端 bundle 在页面加载时注入，**必须重启 dsh**；重装前记得删旧的 `node_modules/dsh-winsync`（pnpm 会硬链旧快照） |
 | 进了同步页退不出来 | 点 dsh 左侧栏里的任意会话，或按 `Ctrl+B` 收起/展开侧栏 | 主区槽由宿主 `layout.selectPanel(null)` 接管；插件不再自带返回按钮 |
 | 同步「看着很慢」 | 设置里的限速是不是非 0 | 1.5 MB @ 256 KB/s 实测 6.6 秒。旧版本把 KB/s 当 kbit/s，慢 8 倍，见 `sync/README.md` |
@@ -156,6 +196,7 @@ tgz **内嵌** `bin/winsync-daemon.exe`（压缩后约 2.9 MB），所以只装�
 ```bash
 node test/client-smoke.mjs   # 客户端注册契约（main 面板 + 左栏行 + 返回对话出口）
 node test/p2-smoke.mjs       # 宿主：路由、代理、CRUD 透传、SSE、工具、卸载清理、/diag 脱敏
+node test/seed-binary.mjs    # 包内种子展开：字节一致、幂等、换种子重展开、坏种子不致命
 node test/cdp-inspect.mjs <url> [port] [--aria=同步]   # 真实页面里的渲染与截图
 
 # 同步本体（双端、安全阀、限速、与 exe 的隔离）在仓库根的 sync/tools/

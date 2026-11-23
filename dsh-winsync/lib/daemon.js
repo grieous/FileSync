@@ -12,11 +12,22 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, promises as fsp, readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  existsSync,
+  mkdirSync,
+  promises as fsp,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { gunzipSync } from 'node:zlib'
 
 import { prefsPath } from './prefs.js'
 
@@ -24,6 +35,12 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const HANDSHAKE = 'daemon.json'
 const HEALTH_TIMEOUT_MS = 400
 const START_TIMEOUT_MS = 8000
+/** 包内种子：`<pkg>\bin\winsync-daemon.exe.gz`，展开到 `<state>\bin\` 再运行。 */
+const SEED_GZ = path.resolve(HERE, '..', 'bin', 'winsync-daemon.exe.gz')
+/** 手工塞进包里的裸 exe（开发/自制包），直接跑，不做种子。 */
+const SEED_EXE = path.resolve(HERE, '..', 'bin', 'winsync-daemon.exe')
+const SEED_TARGET = 'winsync-daemon.exe'
+const SEED_TARGET_DIR = 'bin'
 
 /** 带 code 的错误：代理层直接翻成 `{ok:false,error:{code,message}}`。 */
 export class DaemonError extends Error {
@@ -95,6 +112,7 @@ export class DaemonManager {
     this.owned = false
     this.starting = null
     this.tail = []
+    this.seed = null
   }
 
   push(line) {
@@ -113,20 +131,127 @@ export class DaemonManager {
       stateDir: this.dir,
       prefsPath: prefsPath(this.dir),
       binary: this.info === null ? null : this.resolvedBinary,
+      seed: this.seed,
       log: this.tail.slice(-40),
     }
   }
 
-  /** 二进制查找顺序：偏好 → 环境变量 → 安装目录 → PATH → 仓库开发产物。 */
+  /**
+   * 把包内种子（`bin\winsync-daemon.exe.gz`）展开到 `<state>\bin\`，返回可执行文件路径。
+   *
+   * 为什么绕这一圈：pnpm 覆盖安装时会整目录删掉 `node_modules\dsh-winsync` 再重链，
+   * 而**正在运行的 daemon 会占住那个 exe**，删不掉就报
+   * `EPERM ... dsh-winsync_tmp_<pid>_<n>\bin`。把运行位置固定在状态目录之后，
+   * node_modules 里只剩一个压缩包（数据文件，不会被当可执行文件占用/拦截），
+   * 覆盖安装就退化成一次普通文件替换。顺带也躲开杀软对 `node_modules\*.exe` 的写入拦截。
+   *
+   * 失败不抛：状态目录里已有旧副本就继续用旧的（下次启动再换），一个都没有才算错。
+   */
+  seedBinary() {
+    const targetDir = path.join(this.dir, SEED_TARGET_DIR)
+    const target = path.join(targetDir, SEED_TARGET)
+    const marker = path.join(targetDir, 'seed.json')
+    const fallback = () => {
+      if (existsSync(target)) {
+        this.seed = { ...(this.seed ?? {}), target, reused: true }
+        return target
+      }
+      return null
+    }
+
+    if (!existsSync(SEED_GZ)) return fallback()
+
+    let gz
+    try {
+      gz = readFileSync(SEED_GZ)
+    } catch (error) {
+      this.push(`[seed] 读不到包内种子（${error.code ?? error.message}）`)
+      return fallback()
+    }
+    const digest = createHash('sha256').update(gz).digest('hex')
+
+    // 已经展开过同一份种子：直接用，不重复解压
+    try {
+      const recorded = JSON.parse(readFileSync(marker, 'utf8'))
+      if (recorded?.sha256 === digest && existsSync(target) && statSync(target).size > 0) {
+        this.seed = { target, sha256: digest, reused: true }
+        return target
+      }
+    } catch {
+      /* 没记录/记录坏了都按需要展开处理 */
+    }
+
+    let payload
+    try {
+      payload = gunzipSync(gz)
+    } catch (error) {
+      this.push(`[seed] 包内种子解压失败：${error.message}`)
+      this.seed = { target: null, sha256: digest, error: 'gunzip-failed' }
+      return fallback()
+    }
+    if (payload.length < 64 * 1024) {
+      this.push(`[seed] 解压结果只有 ${payload.length} 字节，不像是真的可执行文件`)
+      this.seed = { target: null, sha256: digest, error: 'payload-too-small' }
+      return fallback()
+    }
+
+    const staging = `${target}.new-${process.pid}`
+    try {
+      mkdirSync(targetDir, { recursive: true })
+      writeFileSync(staging, payload, { mode: 0o755 })
+      renameSync(staging, target)
+    } catch (error) {
+      try {
+        unlinkSync(staging)
+      } catch {
+        /* 清理失败无所谓 */
+      }
+      // EBUSY/EPERM：旧副本正在跑，改不了名。继续用旧的——下一个版本起包里不再有裸 exe 被占用。
+      this.push(`[seed] 落盘失败（${error.code ?? error.message}），沿用状态目录里的旧副本`)
+      this.seed = { target, sha256: digest, error: error.code ?? 'write-failed', reused: true }
+      return existsSync(target) ? target : fallback()
+    }
+
+    try {
+      writeFileSync(
+        marker,
+        JSON.stringify({ sha256: digest, size: payload.length, at: new Date().toISOString() }, null, 2),
+        'utf8',
+      )
+    } catch {
+      /* 标记写不进去只是下次多解压一次 */
+    }
+    this.seed = { target, sha256: digest, size: payload.length, reused: false }
+    this.push(`[seed] 已展开 daemon 到 ${target}（${(payload.length / 1024 / 1024).toFixed(2)} MB）`)
+    return target
+  }
+
+  /**
+   * 二进制查找顺序：
+   * 偏好 → 环境变量 → 包内种子（展开到状态目录）→ 包内裸 exe → 状态目录 → PATH → 仓库产物。
+   *
+   * 前两项是显式指定，优先级高于一切，也**不触发种子展开**（测试与自制构建靠这个）。
+   */
   resolveBinary() {
+    const explicit = []
+    if (this.prefs.binPath) explicit.push(this.prefs.binPath)
+    if (process.env.WINSYNC_DAEMON_BIN) explicit.push(process.env.WINSYNC_DAEMON_BIN)
+    for (const candidate of explicit) {
+      try {
+        if (candidate && existsSync(candidate)) return candidate
+      } catch {
+        /* 路径非法就跳过 */
+      }
+    }
+
     const candidates = []
-    if (this.prefs.binPath) candidates.push(this.prefs.binPath)
-    if (process.env.WINSYNC_DAEMON_BIN) candidates.push(process.env.WINSYNC_DAEMON_BIN)
-    const local = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local')
-    // 随插件一起装的（npm 包里带 bin/），只装 dsh 插件也能跑
-    candidates.push(path.resolve(HERE, '..', 'bin', 'winsync-daemon.exe'))
+    // 包内种子 → <state>\bin：运行点永远不在 node_modules 里
+    candidates.push(this.seedBinary())
+    // 随插件一起装的裸 exe（手工塞进 bin/ 的自制包）：直接跑，不做种子
+    candidates.push(SEED_EXE)
     // 插件自己的数据目录：用户手动放进去的副本
-    candidates.push(path.join(this.dir, 'bin', 'winsync-daemon.exe'))
+    candidates.push(path.join(this.dir, 'bin', SEED_TARGET))
+    const local = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local')
     candidates.push(path.join(local, 'Programs', 'WinSync', 'winsync-daemon.exe'))
     for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
       if (dir) candidates.push(path.join(dir, 'winsync-daemon.exe'))
@@ -145,7 +270,7 @@ export class DaemonManager {
     throw new DaemonError(
       'daemon-missing',
       '找不到 winsync-daemon.exe。请先 cargo build -p sync-daemon，或在插件偏好里设置 binPath',
-      { tried: candidates.filter(Boolean) },
+      { tried: candidates.filter(Boolean), seed: this.seed },
     )
   }
 
