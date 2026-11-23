@@ -106,6 +106,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/autostart", get(get_autostart).post(set_autostart))
         .route("/api/open-dir", post(open_dir))
         .route("/api/fs/list", get(fs_list))
+        .route("/api/probe", post(probe))
         .route("/api/events", get(events_handler))
         .route("/api/shutdown", post(shutdown))
         .route_layer(middleware::from_fn_with_state(
@@ -859,3 +860,106 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+/* ------------------------------------------------------------------ 连接自检 */
+
+/// 浏览器受 CSP、混合内容（https 页面连 ws://）、代理策略限制，面板里的 WebSocket
+/// 经常连不出去；而同一台机器上的 daemon 连得好好的。于是「配对」看起来永远是
+/// 「连不上中继」，用户只能放弃。自检交给 daemon 做，就走的是真正同步那条路。
+///
+/// 关键设计：**只握手，不发 Hello**。
+///   - 中继的密钥校验在握手阶段（`?workspace=&token=` 不对就 401），
+///     所以「握手成功」恰好等于「地址、端口、房间码、密钥四样都对」；
+///   - 一旦发 Hello 就会入房，占掉 2 个位置之一，把对端 daemon 当成同步对端，
+///     让它白等一轮。握手完直接断开，房间里什么都不会发生。
+#[derive(Deserialize)]
+struct ProbeInput {
+    server: String,
+    #[serde(default)]
+    workspace: String,
+    #[serde(default)]
+    token: String,
+}
+
+/// 与网页端 normalizeServer 同一套规则：补协议头、补 /ws。
+fn normalize_probe_server(raw: &str) -> String {
+    let text = raw.trim().trim_end_matches('/');
+    if text.is_empty() {
+        return String::new();
+    }
+    let with_scheme = if text.starts_with("ws://") || text.starts_with("wss://") {
+        text.to_string()
+    } else {
+        format!("ws://{text}")
+    };
+    let after = with_scheme.splitn(2, "://").nth(1).unwrap_or("");
+    if after.contains('/') {
+        with_scheme
+    } else {
+        format!("{with_scheme}/ws")
+    }
+}
+
+async fn probe(Json(body): Json<ProbeInput>) -> ApiResult {
+    let server = normalize_probe_server(&body.server);
+    if server.is_empty() {
+        return Ok(Json(json!({
+            "ok": true,
+            "result": { "state": "bad-url", "message": "服务器地址为空", "elapsed_ms": 0 },
+        })));
+    }
+    let cfg = Config {
+        server: server.clone(),
+        token: body.token,
+        workspace: body.workspace,
+        ..Default::default()
+    };
+    // 与真实同步共用 Config::url()：探测的就是同步将要连的那条地址
+    let url = cfg.url();
+    let started = std::time::Instant::now();
+    let attempt = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        tokio_tungstenite::connect_async(url.as_str()),
+    )
+    .await;
+    let elapsed = started.elapsed().as_millis() as u64;
+
+    let result = match attempt {
+        Err(_) => json!({
+            "state": "timeout",
+            "message": "6 秒内没连上，检查 IP、端口与防火墙",
+            "elapsed_ms": elapsed,
+        }),
+        Ok(Err(err)) => {
+            let denied = matches!(
+                &err,
+                tokio_tungstenite::tungstenite::Error::Http(resp) if resp.status() == 401
+            );
+            if denied {
+                json!({
+                    "state": "denied",
+                    "message": "中继拒绝了这组密钥：房间码或密钥与中继配置不一致",
+                    "elapsed_ms": elapsed,
+                })
+            } else {
+                json!({
+                    "state": "unreachable",
+                    "message": format!("连不上 {}：{err}", cfg.server),
+                    "elapsed_ms": elapsed,
+                })
+            }
+        }
+        Ok(Ok((socket, _))) => {
+            // 不发 Hello，直接断开：房间里不会多出第三个连接
+            drop(socket);
+            json!({
+                "state": "accepted",
+                "message": "中继已接受：地址、房间码与密钥都对",
+                "elapsed_ms": elapsed,
+            })
+        }
+    };
+
+    Ok(Json(json!({ "ok": true, "server": cfg.server, "result": result })))
+}
+

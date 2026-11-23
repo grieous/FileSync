@@ -87,8 +87,8 @@ window.__ModuleLoader__.load({
 .ws-ver:focus-visible{outline:2px solid var(--ws-accent);outline-offset:1px}
 /* 配对状态：ok=两端已在同一房间，bad=进房间失败（房间满/地址错/中继要求密钥） */
 .ws-pair-title{font-weight:600}
-.ws-pair-title[data-presence="ok"]{color:#4CC38A}
-.ws-pair-title[data-presence="bad"]{color:#F0554D}
+.ws-pair-title[data-presence="ok"]{color:var(--ws-ok)}
+.ws-pair-title[data-presence="bad"]{color:var(--ws-danger)}
 .ws-content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .ws-scroll{overflow:auto;padding:18px 24px 32px;flex:1}
 .ws-scroll::-webkit-scrollbar,.ws-raw-body::-webkit-scrollbar{width:8px;height:8px}
@@ -330,22 +330,44 @@ window.__ModuleLoader__.load({
       return `k${Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')}`
     }
 
-    /** 一条消息就能发走的邀请串：`ws://host:port/ws#房间码`。 */
-    function inviteOf(server, room) {
+    /**
+     * 邀请串 = 中继地址 + 房间名 + 密钥，和 daemon 真正连的那条地址同构：
+     * `ws://host:port/ws?workspace=<房间>&token=<密钥>`。
+     *
+     * 以前用的是 `...#房间码`，只带房间、不带密钥——中继一配房间密钥，
+     * 拿邀请串建出来的任务必然 401。现在两者合并，复制邀请 = 复制可用配置。
+     */
+    function inviteOf(server, room, token) {
       const url = normalizeServer(server)
       const code = String(room ?? '').trim()
-      return code ? `${url}#${code}` : url
+      if (!code) return url
+      const params = new URLSearchParams()
+      params.set('workspace', code)
+      params.set('token', String(token ?? '').trim() || code)
+      return `${url}?${params.toString()}`
     }
 
-    /** 反过来：把粘贴进来的邀请串拆成服务器 + 房间码；不是邀请串返回 null。 */
+    /**
+     * 反过来：把粘进来的文本拆成服务器 / 房间码 / 密钥。
+     * 认三种写法：完整邀请串、旧的 `...#房间码`、单独的房间码或 6 位旧配对码。
+     */
     function parseInvite(text) {
       const raw = String(text ?? '').trim()
-      const hash = raw.lastIndexOf('#')
-      if (hash <= 0) return null
-      const server = raw.slice(0, hash)
-      const room = raw.slice(hash + 1).trim()
-      if (!room || /\s/.test(room)) return null
-      return { server, room }
+      if (!raw) return null
+      const full = /^(wss?:\/\/[^\s#?]+)(?:\?([^\s#]*))?(?:#([^\s]*))?$/i.exec(raw)
+      if (full) {
+        const query = new URLSearchParams(full[2] ?? '')
+        const hashRoom = String(full[3] ?? '').trim()
+        const room = String(query.get('workspace') ?? query.get('room') ?? hashRoom ?? '').trim()
+        if (!room) return null
+        const token = String(query.get('token') ?? '').trim() || room
+        return { server: full[1], room, token }
+      }
+      if (/^\S{4,}$/.test(raw) && !/[\\/]/.test(raw)) {
+        const room = /^\d{6}$/.test(raw) ? `pair-${raw}` : raw
+        return { server: '', room, token: room }
+      }
+      return null
     }
 
     /**
@@ -360,234 +382,6 @@ window.__ModuleLoader__.load({
       if (scheme === 'light') return 'light'
       if (scheme === 'dark') return 'dark'
       return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
-    }
-
-    /** 由房间码派生的 4 位校验码：两端显示的必须一样，用户口头核对（蓝牙式的「确认配对」）。 */
-    function verifyCode(room) {
-      let h = 0
-      for (const ch of String(room ?? '')) h = (h * 31 + ch.codePointAt(0)) >>> 0
-      return String((h ^ 0x5a5a) % 10000).padStart(4, '0')
-    }
-
-    /** 6 位配对码 → 配对房间名。短码只用来说「见个面」，配对完建议换成随机码。 */
-    function pairRoom(digits) {
-      const clean = String(digits ?? '').replace(/\D/g, '').slice(0, 6)
-      return clean.length === 6 ? `pair-${clean}` : ''
-    }
-
-    function newPairCode() {
-      return String(Math.floor(Math.random() * 1000000)).padStart(6, '0')
-    }
-
-    /**
-     * 配对用的旁路房间名。
-     *
-     * 中继一个房间最多 2 端。如果「等对端」的连接直接挂在真房间里，就会和正在同步的
-     * daemon 抢位：要么把对方挤掉，要么被对方的 daemon 当成同步对端——对面发来
-     * IndexDigest，这边根本不会回应，最后白等一轮超时。加个后缀开旁路房间，
-     * 既不冲突，也不打扰正在跑的任务。两端用同一规则派生，所以照样能相遇。
-     */
-    const WAITING_SUFFIX = '::pair'
-    function waitingRoom(room) {
-      return `${String(room ?? '').trim()}${WAITING_SUFFIX}`
-    }
-
-    /** 控制帧：1 字节类型（0=控制）+ JSON，与 daemon/中继用的是同一套帧格式。 */
-    function encodeControl(message) {
-      const body = new TextEncoder().encode(JSON.stringify(message))
-      const frame = new Uint8Array(1 + body.length)
-      frame[0] = 0
-      frame.set(body, 1)
-      return frame
-    }
-
-    function decodeControl(data) {
-      try {
-        const bytes = new Uint8Array(data)
-        if (bytes[0] !== 0) return null
-        return JSON.parse(new TextDecoder().decode(bytes.subarray(1)))
-      } catch {
-        return null
-      }
-    }
-
-    // 同一页面生命周期内固定：断线重连时中继会踢掉自己那条旧连接（同 device_id 替换），
-    // 而不是把本就只有两个的位置再占掉一个。
-    const PRESENCE_DEVICE = `dsh-ui-${Math.random().toString(16).slice(2, 10)}`
-
-    /**
-     * 「加入房间等着」，不是拍一张照就走。
-     *
-     * 之前是点「检测配对」才开一条 WS、发个 Hello、拿到一条 PeerStatus 就关。
-     * 这意味着双方必须**恰好在那 8 秒窗口里同时点**才可能互见；而生成校验码的那一端
-     * 压根没进房间，所以另一端怎么点都只有自己——这就是那个错位的根源。
-     *
-     * 现在只要服务器与房间码有效就常驻。中继在第二端入房时会给房间里的两端各推一条
-     * PeerStatus，有人离开时也会推 peer_online=false，所以谁先谁后都能互相看见，
-     * 不需要掐时间点。心跳 20 秒一次，与 daemon 一致（中继 180 秒无数据就当僵尸踢）。
-     *
-     * @param {(next: {state: string, detail: string}) => void} handlers.onStatus
-     * @param {(online: boolean, peer: string) => void} handlers.onPeer
-     */
-    function openPresence(url, room, handlers) {
-      const target = waitingRoom(room)
-      let socket = null
-      let heartbeat = null
-      let retryTimer = null
-      let attempt = 0
-      let stopped = false
-
-      const report = (state, detail = '') => {
-        if (!stopped) handlers.onStatus({ state, detail })
-      }
-      const clearTimers = () => {
-        if (heartbeat) clearInterval(heartbeat)
-        if (retryTimer) clearTimeout(retryTimer)
-        heartbeat = null
-        retryTimer = null
-      }
-
-      const connect = () => {
-        if (stopped) return
-        report(attempt === 0 ? 'connecting' : 'retrying')
-        try {
-          socket = new WebSocket(url)
-        } catch {
-          report('error', '服务器地址无效')
-          return
-        }
-        socket.binaryType = 'arraybuffer'
-
-        socket.addEventListener('open', () => {
-          attempt = 0
-          socket.send(
-            encodeControl({ t: 'hello', device_id: PRESENCE_DEVICE, workspace_id: target, proto_ver: 1 }),
-          )
-          heartbeat = setInterval(() => {
-            try {
-              socket.send(encodeControl({ t: 'keep_alive' }))
-            } catch {
-              /* 断开由 close 处理 */
-            }
-          }, 20000)
-        })
-
-        socket.addEventListener('message', (event) => {
-          const message = decodeControl(event.data)
-          if (!message) return
-          if (message.t === 'peer_status') {
-            const online = !!message.peer_online
-            report(online ? 'matched' : 'waiting')
-            handlers.onPeer(online, message.peer_device_id || '')
-          } else if (message.t === 'bye') {
-            // 房间满 / 协议不符：重连也没用，停下来并把原因说清楚
-            clearTimers()
-            stopped = true
-            report('error', message.reason || '被中继断开')
-            try {
-              socket.close()
-            } catch {
-              /* 已经关了 */
-            }
-          }
-        })
-
-        socket.addEventListener('error', () => {
-          report('error', '连不上中继，检查地址和端口')
-        })
-
-        socket.addEventListener('close', () => {
-          clearTimers()
-          if (stopped) return
-          attempt = Math.min(attempt + 1, 6)
-          report('retrying', `${((attempt * 400) / 1000).toFixed(1)} 秒后重试`)
-          retryTimer = setTimeout(connect, attempt * 400)
-        })
-      }
-
-      connect()
-
-      return {
-        /** 主动离开房间：中继会给房间里的另一端推 peer_online=false。 */
-        close() {
-          return new Promise((resolve) => {
-            stopped = true
-            clearTimers()
-            if (!socket || socket.readyState === WebSocket.CLOSED) {
-              resolve()
-              return
-            }
-            socket.addEventListener('close', () => resolve(), { once: true })
-            try {
-              socket.close()
-            } catch {
-              resolve()
-            }
-            // 浏览器把 socket 挂起时也不能卡住「创建」
-            setTimeout(resolve, 800)
-          })
-        },
-      }
-    }
-
-    // 一次性探测用另一个设备号：它只在真房间里停留几百毫秒，别和等待连接混在一起
-    const PROBE_DEVICE = `dsh-probe-${Math.random().toString(16).slice(2, 10)}`
-
-    /**
-     * 快速看一眼真房间里有没有人——用于「对端已经建好任务、不在等待房间」的情况。
-     *
-     * 只发 Hello、拿到一条 PeerStatus 就走了，最多停 1.5 秒。对方的 daemon 会看到
-     * 一次「对端上线又离开」，但它本来就在等对端，不会因此报错；比起让用户卡在
-     * 「等待对端」永远进不去，这点扰动可以接受。
-     *
-     * 返回 true / false / null（超时、连不上、被踢）。
-     */
-    function probeOnce(url, room, timeoutMs = 1500) {
-      return new Promise((resolve) => {
-        let settled = false
-        let socket = null
-        const finish = (value) => {
-          if (settled) return
-          settled = true
-          try {
-            socket?.close()
-          } catch {
-            /* 已经关了 */
-          }
-          resolve(value)
-        }
-        try {
-          socket = new WebSocket(url)
-        } catch {
-          resolve(null)
-          return
-        }
-        socket.binaryType = 'arraybuffer'
-        const timer = setTimeout(() => finish(null), timeoutMs)
-        socket.addEventListener('open', () => {
-          socket.send(
-            encodeControl({ t: 'hello', device_id: PROBE_DEVICE, workspace_id: room, proto_ver: 1 }),
-          )
-        })
-        socket.addEventListener('message', (event) => {
-          const message = decodeControl(event.data)
-          if (message?.t === 'peer_status') {
-            clearTimeout(timer)
-            finish(!!message.peer_online)
-          } else if (message?.t === 'bye') {
-            clearTimeout(timer)
-            finish(null)
-          }
-        })
-        socket.addEventListener('error', () => {
-          clearTimeout(timer)
-          finish(null)
-        })
-        socket.addEventListener('close', () => {
-          clearTimeout(timer)
-          finish(null)
-        })
-      })
     }
 
     /** 记录页把相对路径拼回磁盘绝对路径（任务目录 + 相对路径），分隔符统一成反斜杠。 */
@@ -823,7 +617,7 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------ 任务卡 */
 
-    function TaskCard({ task, onEdit, onSync, onPause, onOpenDir, onDelete, onShowLog }) {
+    function TaskCard({ task, onEdit, onSync, onPause, onOpenDir, onDelete, onShowLog, onCopyInvite }) {
       const [menu, setMenu] = React.useState(false)
       const status = statusOf(task)
       const rt = task.runtime ?? {}
@@ -872,6 +666,7 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'ws-menu' },
               h('button', { onClick: () => { setMenu(false); onEdit(task) } }, '设置'),
+              h('button', { onClick: () => { setMenu(false); void onCopyInvite(task) } }, '复制邀请'),
               h('button', { onClick: () => { setMenu(false); onOpenDir(task) } }, '打开目录'),
               h('button', { onClick: () => { setMenu(false); onShowLog(task) } }, '查看日志'),
               h('hr'),
@@ -992,6 +787,30 @@ window.__ModuleLoader__.load({
           on ? '已开启自动同步' : '已暂停自动同步',
         )
 
+      /**
+       * 任务卡上的「复制邀请」：把 server+房间+密钥 一次给全。
+       * 密钥不在 /state 里，只能按需向 daemon 要一次；要不到就退回「同房间码」。
+       */
+      const copyInvite = async (task) => {
+        let secret = ''
+        if (task.has_token) {
+          try {
+            const body = await api(`/tasks/${encodeURIComponent(task.id)}/token`)
+            secret = body.token ?? ''
+          } catch (e) {
+            store.notify(e.message, 'bad')
+            return
+          }
+        }
+        const text = inviteOf(task.server, task.workspace, secret || task.workspace)
+        try {
+          await navigator.clipboard.writeText(text)
+          store.notify('邀请已复制，发给对方即可', 'ok')
+        } catch {
+          store.notify(`复制失败，可手动复制：${text}`, 'bad')
+        }
+      }
+
       return h(
         'div',
         { className: 'ws-scroll' },
@@ -1040,6 +859,7 @@ window.__ModuleLoader__.load({
                 onOpenDir: openDir,
                 onDelete: remove,
                 onShowLog: (t) => store.showRawLog(t.id),
+                onCopyInvite: copyInvite,
               }),
             ),
       )
@@ -1375,9 +1195,28 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [showToken, setShowToken] = React.useState(false)
 
-      // 密钥从不回传到 /state（那里只有 has_token），只有点「显示」时才按需取一次。
+      // 密钥不进 /state（那里只有 has_token），打开设置时按需取一次：
+      // 「复制邀请」必须带上它，否则对方拿到的是缺密钥的半截配置。
+      React.useEffect(() => {
+        if (!task.has_token) return
+        let alive = true
+        void (async () => {
+          try {
+            const body = await api(`/tasks/${encodeURIComponent(task.id)}/token`)
+            if (alive) setForm((prev) => (prev.token ? prev : { ...prev, token: body.token ?? '' }))
+          } catch {
+            /* 取不到就退回「同房间码」，下面会提示 */
+          }
+        })()
+        return () => {
+          alive = false
+        }
+      }, [task.id, task.has_token])
+
+      const secret = form.token.trim() || form.workspace.trim()
+
       const copyInvite = async () => {
-        const text = inviteOf(form.server, form.workspace)
+        const text = inviteOf(form.server, form.workspace, secret)
         try {
           await navigator.clipboard.writeText(text)
           store.notify('邀请已复制，发给对方即可', 'ok')
@@ -1386,24 +1225,13 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const revealToken = async () => {
-        const next = !showToken
-        if (next && form.token === '' && task.has_token) {
-          try {
-            const body = await api(`/tasks/${encodeURIComponent(task.id)}/token`)
-            setForm((prev) => ({ ...prev, token: body.token ?? '' }))
-          } catch (e) {
-            store.notify(e.message, 'bad')
-          }
-        }
-        setShowToken(next)
-      }
+      const revealToken = () => setShowToken((v) => !v)
 
       const body = (force) => ({
         name: form.name,
         server: normalizeServer(form.server),
-        // 房间码同时就是配对凭证；中继开放模式下不校验它
-        token: form.workspace,
+        // 中继没配房间密钥时它不校验 token，留空就跟随房间码；配了就必须是那一把
+        token: secret,
         workspace: form.workspace,
         root: form.root,
         mode: form.mode,
@@ -1509,10 +1337,34 @@ window.__ModuleLoader__.load({
                 ),
               ),
               h('div', { className: 'ws-hint' }, '双方必须相同；点「复制邀请」把整串发对方'),
-              form.workspace.startsWith('pair-')
-                ? h('div', { className: 'ws-hint' }, `校验码 ${verifyCode(form.workspace)}：两端必须一致`)
-                : null,
-              h('div', { className: 'ws-hint ws-mono' }, inviteOf(form.server, form.workspace)),
+              h('div', { className: 'ws-hint ws-mono', style: { wordBreak: 'break-all' } },
+                inviteOf(form.server, form.workspace, secret)),
+            ),
+            h(
+              'div',
+              { className: 'ws-field' },
+              h('label', null, '密钥'),
+              h(
+                'div',
+                { className: 'ws-field-row' },
+                h('input', {
+                  className: 'ws-input',
+                  type: showToken ? 'text' : 'password',
+                  value: form.token,
+                  placeholder: '留空则与房间码相同',
+                  onChange: (e) => setForm({ ...form, token: e.target.value }),
+                }),
+                h(
+                  'button',
+                  { type: 'button', className: 'ws-btn', onClick: revealToken },
+                  showToken ? '隐藏' : '显示',
+                ),
+              ),
+              h(
+                'div',
+                { className: 'ws-hint' },
+                '中继启动时配了房间密钥（SYNC_ROOM_TOKENS）才有这一项；两端必须填同一把，留空表示跟随房间码',
+              ),
             ),
             h(
               'div',
@@ -1574,30 +1426,16 @@ window.__ModuleLoader__.load({
       const [step, setStep] = React.useState(0)
       const [busy, setBusy] = React.useState(false)
       const [entry, setEntry] = React.useState('create')
-      const [paired, setPaired] = React.useState(null)
-      const [peerId, setPeerId] = React.useState('')
-      // idle / connecting / waiting / matched / retrying / error
-      const [presence, setPresence] = React.useState({ state: 'idle', detail: '' })
-      // 「对端已建好任务」的旁证：等待房间没人时，去真房间看一眼
-      const [roomPeer, setRoomPeer] = React.useState(null)
-      // 「重新加入」的计数器：只用来重建连接，不改房间
-      const [joinNonce, setJoinNonce] = React.useState(0)
-      const presenceRef = React.useRef(null)
-      const copyInvite = async () => {
-        const text = inviteOf(form.server, form.workspace)
-        try {
-          await navigator.clipboard.writeText(text)
-          store.notify('邀请已复制，发给对方即可', 'ok')
-        } catch {
-          store.notify(`复制失败，可手动复制：${text}`, 'bad')
-        }
-      }
+      // 自检结果：idle / testing / accepted / denied / unreachable / timeout / bad-url / error
+      const [probe, setProbe] = React.useState({ state: 'idle', detail: '', at: 0 })
+      // 手动「重新测试」的计数器：只用来重跑一次，不改配置
+      const [probeNonce, setProbeNonce] = React.useState(0)
       const [form, setForm] = React.useState({
         server: '',
-        token: '',
         // 默认就生成一个随机房间码：不用再想名字，也不用去中继登记
         workspace: newRoomCode(),
-        pair: '',
+        // 密钥（中继没配房间密钥时留空即可，等于用房间码）
+        token: '',
         joinText: '',
         root: '',
         name: '',
@@ -1606,117 +1444,94 @@ window.__ModuleLoader__.load({
         ext: '',
       })
 
+      const room = form.workspace.trim()
+      const secret = form.token.trim() || room
+      const normalized = normalizeServer(form.server)
+      const serverReady = /^wss?:\/\/[^\s/]+/.test(normalized)
+
+      const copyInvite = async () => {
+        const text = inviteOf(form.server, room, secret)
+        try {
+          await navigator.clipboard.writeText(text)
+          store.notify('邀请已复制，发给对方即可', 'ok')
+        } catch {
+          store.notify(`复制失败，可手动复制：${text}`, 'bad')
+        }
+      }
+
       /**
-       * 进入配对步骤就「加入房间」，不再等用户点按钮。
+       * 连接自检交给 daemon 做，不在浏览器里开 WebSocket。
        *
-       * 这是那个错位的关键：以前生成校验码之后本地并没有进房间，另一端点「检测配对」时
-       * 房间里只有它自己，于是永远「对端不在线」。现在只要服务器与房间码有效就挂着等，
-       * 两端谁先谁后都能互见，配对自动完成。
+       * 原因有两个，都是实测出来的：
+       *   1. 面板跑在 dsh 的页面里，CSP 与混合内容（https 页面连 ws://）会直接掐掉
+       *      到中继的连接，而同一台机器上的 daemon 连得好好的——用户看到的就是
+       *      「配对永远连不上」，怎么点都没用；
+       *   2. 中继的密钥校验在握手阶段完成（`?workspace=&token=` 不对就 401），
+       *      所以「握手成功」就等于「地址、端口、房间码、密钥四样都对」，
+       *      而这恰好是用户唯一会填错的部分。
        *
-       * 只在第一步挂着：进了第二步还占着的话，对方 daemon 连上真房间时这边会被当成
-       * 同步对端（我们不回任何同步帧），对方会白等一轮。旁路房间见 waitingRoom()。
+       * 只握手、不发 Hello：占房间位置会让对端 daemon 白等一轮，没必要。
        */
       React.useEffect(() => {
-        setPaired(null)
-        setPeerId('')
-        setRoomPeer(null)
+        if (step !== 0 || busy) return undefined
         const url = normalizeServer(form.server)
-        const room = form.workspace.trim()
-        if (step !== 0 || busy || !url || !room) {
-          setPresence({ state: 'idle', detail: '' })
+        const code = form.workspace.trim()
+        if (!/^wss?:\/\/[^\s/]+/.test(url) || !code) {
+          setProbe({ state: 'idle', detail: '', at: 0 })
           return undefined
         }
         let alive = true
-        // 房间码是一个字一个字敲出来的，等停顿再连，别把中继的连接配额刷爆
-        const delay = setTimeout(() => {
-          if (!alive) return
-          presenceRef.current = openPresence(url, room, {
-            onStatus: (next) => {
-              if (alive) setPresence(next)
-            },
-            onPeer: (online, peer) => {
-              if (!alive) return
-              setPaired(online)
-              setPeerId(peer)
-            },
-          })
-        }, 450)
-        return () => {
-          alive = false
-          clearTimeout(delay)
-          void presenceRef.current?.close()
-          presenceRef.current = null
-        }
-      }, [form.server, form.workspace, step, busy, joinNonce])
-
-      /**
-       * 等待房间里一直没人时，隔 3 秒去真房间看一眼。
-       *
-       * 为什么需要：对方很可能**已经建好任务**了——它的等待连接在进入第二步时就撤了，
-       * 房间里只剩 daemon。这时在等待房间等一辈子也等不到，用户会以为配对坏了。
-       * 这种情况不该拦着不让建任务，所以只做一次轻量探测，把「对端已建好」如实说出来。
-       *
-       * 本机已有同房间任务时跳过：真房间里的「对端」就是自己，不算证据。
-       */
-      React.useEffect(() => {
-        if (presence.state !== 'waiting') return undefined
-        const url = normalizeServer(form.server)
-        const room = form.workspace.trim()
-        if (!url || !room) return undefined
-        let alive = true
+        setProbe({ state: 'testing', detail: '', at: 0 })
+        // 房间码是一个字一个字敲的，等停顿再发，别把中继的每分钟配额刷爆
         const timer = setTimeout(async () => {
-          if (!alive) return
-          const mine = (store.data?.tasks ?? []).some(
-            (task) => task.workspace === room && normalizeServer(task.server) === url,
-          )
-          if (mine) {
-            setRoomPeer('self')
-            return
+          try {
+            const body = await api('/probe', {
+              method: 'POST',
+              body: { server: url, workspace: code, token: form.token.trim() || code },
+            })
+            if (!alive) return
+            const result = body?.result ?? {}
+            setProbe({ state: result.state ?? 'error', detail: result.message ?? '', at: Date.now() })
+          } catch (e) {
+            if (alive) setProbe({ state: 'error', detail: e.message, at: Date.now() })
           }
-          const online = await probeOnce(url, room)
-          if (alive) setRoomPeer(online)
-        }, 3000)
+        }, 600)
         return () => {
           alive = false
           clearTimeout(timer)
         }
-      }, [presence.state, form.server, form.workspace, store.data])
+      }, [step, busy, form.server, form.workspace, form.token, probeNonce])
 
-      const pairTitle = () => {
-        if (paired === true) return `配对已通过${peerId ? ` · 对端 ${peerId.slice(0, 8)}` : ''}`
-        if (presence.state === 'error') return `加入房间失败：${presence.detail || '未知原因'}`
-        if (roomPeer === true) return '对端已建好任务，不在等待房间'
-        if (presence.state === 'waiting') return '已在房间等待对端…'
-        if (presence.state === 'connecting') return '正在加入房间…'
-        if (presence.state === 'retrying') return '连接断开，正在重新加入…'
-        return '尚未加入房间'
+      const probeTitle = () => {
+        if (probe.state === 'testing') return '正在自检…'
+        if (probe.state === 'accepted') return '中继已接受这组配置'
+        if (probe.state === 'denied') return '中继拒绝了密钥'
+        if (probe.state === 'unreachable') return '连不上中继'
+        if (probe.state === 'timeout') return '连接超时'
+        if (probe.state === 'bad-url') return '服务器地址无效'
+        if (probe.state === 'error') return '自检没跑起来'
+        return '尚未自检'
       }
 
-      const pairHint = () => {
-        if (paired === true) {
-          return '两端已在同一房间；校验码一致就可以进下一步设置目录。'
+      const probeHint = () => {
+        if (probe.state === 'accepted') {
+          return '地址、房间码、密钥都对。把邀请串发给对方，对方用它建任务后两端就会开始同步；这里不需要等对方在线。'
         }
-        if (roomPeer === true) {
-          return '对方的任务已经在同步，所以它不会待在等待房间。直接继续建任务即可，两端用同一个房间码就会自动同步。'
+        if (probe.state === 'denied') {
+          return '房间码或密钥与中继配置不一致。中继没配房间密钥时，密钥就等于房间码——所以这里留空即可。'
         }
-        if (roomPeer === 'self') {
-          return '这个房间里有本机已建好的任务，无法用它判断对端。要继续就换个房间码，或者照样建（两端房间码一致即可）。'
+        if (probe.state === 'unreachable' || probe.state === 'timeout') {
+          return `${probe.detail || '检查 IP 与端口'}。端口不是 18443 就写全，例如 192.168.3.222:18443。`
         }
-        if (presence.state === 'waiting') {
-          return '把邀请发给对方。对方一进这个房间，这里会自己变成「配对已通过」，不用再点检测。'
+        if (probe.state === 'error') {
+          return `同步服务可能还没起来：${probe.detail || '重启 dsh 再试'}`
         }
-        if (presence.state === 'error') {
-          return '检查服务器地址与端口；中继要求密钥时，任务的密钥也必须与房间里那把一致。'
-        }
-        return '填好服务器与房间码后会自动加入房间等待对端，不用手动点检测。'
+        return '填好服务器与房间码会自动自检；自检只验证配置，不需要对方同时在线。'
       }
 
       const issues = []
-      if (!form.workspace.trim()) issues.push('未填写房间码')
-      // 只校验「补全之后」是不是一个合法地址，用户不需要关心 ws:// 和 /ws。
-      if (!/^wss?:\/\/[^\s/]+/.test(normalizeServer(form.server))) {
-        issues.push('只填服务器 IP 或 IP:端口即可')
-      }
+      if (!room) issues.push('未填写房间码')
+      if (!serverReady) issues.push('只填服务器 IP 或 IP:端口即可')
       if (step >= 1) {
         if (!form.root.trim()) issues.push('未选择同步目录')
         else if (!/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(form.root.trim())) {
@@ -1724,17 +1539,17 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 配对上不等于不能继续：对方可能已经建好任务（不在等待房间），也可能就是先建后连。
-      // 真正会出问题的只有「两端房间码不一致」——那种情况任务建好后会在同步时报出来。
-      const canProceed = paired === true || roomPeer === true
+      // 只有「已经证明这组配置连不上」才拦人：没自检过、或自检通过都放行。
+      // 以前要求「对端必须在线」才给下一步，等于逼两台机器同时开着窗口，谁先建谁卡住。
+      const blocked =
+        probe.state === 'denied' ||
+        probe.state === 'unreachable' ||
+        probe.state === 'timeout' ||
+        probe.state === 'bad-url'
 
       const create = async () => {
         setBusy(true)
         try {
-          // 先退出「等待对端」的连接：daemon 马上要连真房间，别和它抢那 2 个位置。
-          // close() 会等 socket 真的关掉（最多 800ms），不是「发了关闭帧就走」。
-          await presenceRef.current?.close()
-          presenceRef.current = null
           await store.run(
             () =>
               api('/tasks', {
@@ -1742,8 +1557,9 @@ window.__ModuleLoader__.load({
                 body: {
                   name: form.name,
                   server: normalizeServer(form.server),
-                  token: form.workspace,
-                  workspace: form.workspace,
+                  // 密钥留空就跟随房间码：中继没配房间密钥时它本来就不校验
+                  token: secret,
+                  workspace: room,
                   root: form.root,
                   mode: form.mode,
                   filter: {
@@ -1770,7 +1586,7 @@ window.__ModuleLoader__.load({
       const stepBar = h(
         'div',
         { className: 'ws-steps' },
-        ['1 服务器', '2 本机目录', '3 确认'].map((label, index) =>
+        ['1 连接中继', '2 本机目录', '3 确认'].map((label, index) =>
           h(
             'div',
             { key: label, className: 'ws-step', 'data-state': index < step ? 'done' : index === step ? 'on' : 'todo' },
@@ -1779,15 +1595,117 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      const serverField = h(
+        'div',
+        { className: 'ws-field' },
+        h('label', null, '中继地址'),
+        h('input', {
+          className: 'ws-input',
+          value: form.server,
+          placeholder: '192.168.3.222 或 192.168.3.222:18443',
+          onChange: (e) => setForm({ ...form, server: e.target.value }),
+        }),
+        h(
+          'div',
+          { className: 'ws-hint' },
+          `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}；协议头与 /ws 会自动补上`,
+        ),
+        h('div', { className: 'ws-hint ws-mono' }, `将连接 ${normalized || '（待填写）'}`),
+      )
+
+      const roomField = h(
+        'div',
+        { className: 'ws-field' },
+        h('label', null, '房间码'),
+        h(
+          'div',
+          { className: 'ws-field-row' },
+          h('input', {
+            className: 'ws-input',
+            value: form.workspace,
+            placeholder: '两端必须一致',
+            onChange: (e) => setForm({ ...form, workspace: e.target.value }),
+          }),
+          h(
+            'button',
+            { type: 'button', className: 'ws-btn', onClick: () => setForm({ ...form, workspace: newRoomCode() }) },
+            '换一个',
+          ),
+        ),
+        h(
+          'div',
+          { className: 'ws-hint' },
+          '随机码就是房间，也是默认密钥；不用去中继登记，也不用起名字',
+        ),
+      )
+
+      const tokenField = h(
+        'div',
+        { className: 'ws-field' },
+        h('label', null, '密钥（可选）'),
+        h('input', {
+          className: 'ws-input',
+          value: form.token,
+          placeholder: '留空则与房间码相同',
+          onChange: (e) => setForm({ ...form, token: e.target.value }),
+        }),
+        h(
+          'div',
+          { className: 'ws-hint' },
+          '只有中继启动时配了房间密钥（SYNC_ROOM_TOKENS）才需要填；两端必须填同一把',
+        ),
+      )
+
+      const probeCard = h(
+        'div',
+        { className: 'ws-card', style: { marginTop: 12 } },
+        h(
+          'div',
+          { className: 'ws-row', style: { justifyContent: 'space-between', alignItems: 'flex-start' } },
+          h(
+            'div',
+            { style: { minWidth: 0, flex: 1 } },
+            h(
+              'div',
+              {
+                className: 'ws-pair-title',
+                'data-presence': probe.state === 'accepted' ? 'ok' : blocked ? 'bad' : 'idle',
+              },
+              probe.state === 'accepted' ? `✓ ${probeTitle()}` : blocked ? `✗ ${probeTitle()}` : probeTitle(),
+            ),
+            h('div', { className: 'ws-hint' }, probeHint()),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'ws-btn',
+              // 卡片行里空间紧，「重新自检」会被挤成两行
+              style: { whiteSpace: 'nowrap', flexShrink: 0 },
+              disabled: probe.state === 'testing',
+              onClick: () => setProbeNonce((n) => n + 1),
+            },
+            probe.state === 'testing' ? '自检中…' : '重新自检',
+          ),
+        ),
+      )
+
+      const inviteCard = h(
+        'div',
+        { className: 'ws-field' },
+        h('label', null, '邀请串'),
+        h('div', { className: 'ws-hint ws-mono', style: { wordBreak: 'break-all', marginBottom: 6 } },
+          form.server.trim() ? inviteOf(form.server, room, secret) : '（填写中继地址后生成）'),
+        h(
+          'button',
+          { type: 'button', className: 'ws-btn', disabled: !form.server.trim() || !room, onClick: () => void copyInvite() },
+          '复制邀请',
+        ),
+        h('div', { className: 'ws-hint' }, '整串发给对方，对方粘进「加入已有同步」就能带着地址、房间码、密钥一起填好'),
+      )
+
       const body = () => {
         if (step === 0) {
-          const invite = parseInvite(form.joinText)
-          const joinRoom = invite
-            ? invite.room
-            : /^\d{6}$/.test(form.joinText.trim())
-              ? pairRoom(form.joinText)
-              : ''
-          const joinServer = invite ? invite.server : form.server
           return h(
             'div',
             null,
@@ -1821,198 +1739,41 @@ window.__ModuleLoader__.load({
                   null,
                   h(
                     'div',
-                    { className: 'ws-hint', style: { marginBottom: 10 } },
-                    '让对方在任务卡上点「复制邀请」，把整串发给你，粘到下面即可；如果对方只给了 6 位配对码，再补上服务器地址。',
-                  ),
-                  h(
-                    'div',
                     { className: 'ws-field' },
-                    h('label', null, '邀请串或配对码'),
+                    h('label', null, '邀请串'),
                     h('input', {
                       className: 'ws-input',
-                      placeholder: 'ws://192.168.3.222:18443/ws#pair-123456 或 123456',
+                      placeholder: 'ws://192.168.3.222:18443/ws?workspace=…&token=…',
                       value: form.joinText,
                       onChange: (e) => {
                         const text = e.target.value
                         const inv = parseInvite(text)
-                        if (inv) setForm({ ...form, joinText: text, server: inv.server, workspace: inv.room })
-                        else if (/^\d{6}$/.test(text.trim())) {
-                          setForm({ ...form, joinText: text, workspace: pairRoom(text) })
-                        } else setForm({ ...form, joinText: text })
-                      },
-                    }),
-                    h('div', { className: 'ws-hint' }, '粘邀请串会自动带出服务器地址与房间码'),
-                  ),
-                  h(
-                    'div',
-                    { className: 'ws-field' },
-                    h('label', null, '服务器地址'),
-                    h('input', {
-                      className: 'ws-input',
-                      value: form.server,
-                      placeholder: '192.168.3.222 或 192.168.3.222:18443',
-                      onChange: (e) => setForm({ ...form, server: e.target.value }),
-                    }),
-                    h('div', { className: 'ws-hint' }, '默认端口 8443；对方用的是别的端口就写全，例如 :18443'),
-                  ),
-                  joinRoom
-                    ? h(
-                        'div',
-                        { className: 'ws-card', style: { marginTop: 4 } },
-                        h(
-                          'div',
-                          null,
-                          `将加入 ${shortServer(normalizeServer(joinServer)) || '（待填服务器）'} 的房间 ${joinRoom}`,
-                        ),
-                        joinRoom.startsWith('pair-')
-                          ? h(
-                              'div',
-                              { className: 'ws-hint', style: { marginTop: 4 } },
-                              `校验码 ${verifyCode(joinRoom)}：和对方屏幕上显示的 4 位数一致才继续`,
-                            )
-                          : null,
-                      )
-                    : h(
-                        'div',
-                        { className: 'ws-hint' },
-                        '还没识别到房间：粘贴整串邀请，或输入对方的 6 位配对码',
-                      ),
-                )
-              : h(
-                  'div',
-                  null,
-                  h(
-                    'div',
-                    { className: 'ws-field' },
-                    h('label', null, '服务器地址'),
-                    h('input', {
-                      className: 'ws-input',
-                      value: form.server,
-                      placeholder: '192.168.3.222 或 192.168.3.222:18443',
-                      onChange: (e) => {
-                        const text = e.target.value
-                        const inv = parseInvite(text)
-                        if (inv) setForm({ ...form, server: inv.server, workspace: inv.room })
-                        else setForm({ ...form, server: text })
+                        if (inv) {
+                          setForm({
+                            ...form,
+                            joinText: text,
+                            // 界面里统一显示 host:port，不把 ws://…/ws 这种写法摊给用户
+                            server: inv.server ? shortServer(inv.server) : form.server,
+                            workspace: inv.room,
+                            token: inv.token && inv.token !== inv.room ? inv.token : '',
+                          })
+                        } else {
+                          setForm({ ...form, joinText: text })
+                        }
                       },
                     }),
                     h(
                       'div',
                       { className: 'ws-hint' },
-                      `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}；协议头与 /ws 会自动补上`,
-                    ),
-                    h(
-                      'div',
-                      { className: 'ws-hint ws-mono' },
-                      `将连接 ${normalizeServer(form.server) || '（待填写）'}`,
+                      '粘贴整串即可带出下面三项；只有 6 位数字也会当成旧版配对码（房间 pair-xxxxxx）',
                     ),
                   ),
-                  h(
-                    'div',
-                    { className: 'ws-field' },
-                    h('label', null, '房间码'),
-                    h(
-                      'div',
-                      { className: 'ws-field-row' },
-                      h('input', {
-                        className: 'ws-input',
-                        value: form.workspace,
-                        onChange: (e) => setForm({ ...form, workspace: e.target.value }),
-                      }),
-                      h(
-                        'button',
-                        { type: 'button', className: 'ws-btn', onClick: () => void copyInvite() },
-                        '复制邀请',
-                      ),
-                    ),
-                    h('div', { className: 'ws-hint' }, '自动生成的随机码；对方用它配对，不用去中继登记'),
-                  ),
-                  h(
-                    'div',
-                    { className: 'ws-field-row', style: { marginTop: 6 } },
-                    h('input', {
-                      className: 'ws-input',
-                      placeholder: '6 位配对码（可选，口头告诉对方）',
-                      value: form.pair,
-                      maxLength: 6,
-                      inputMode: 'numeric',
-                      onChange: (e) =>
-                        setForm({ ...form, pair: e.target.value.replace(/\D/g, '').slice(0, 6) }),
-                    }),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'ws-btn',
-                        onClick: () => {
-                          const code = newPairCode()
-                          setForm({ ...form, pair: code, workspace: pairRoom(code) })
-                        },
-                      },
-                      '生成',
-                    ),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'ws-btn',
-                        onClick: () => {
-                          const room = pairRoom(form.pair)
-                          if (!room) return store.notify('配对码要 6 位数字', 'bad')
-                          setForm({ ...form, workspace: room })
-                        },
-                      },
-                      '使用',
-                    ),
-                  ),
-                  form.workspace.startsWith('pair-')
-                    ? h(
-                        'div',
-                        { className: 'ws-hint' },
-                        `校验码 ${verifyCode(form.workspace)}：两端显示的数必须一样，对上了再继续`,
-                      )
-                    : null,
-                  h(
-                    'div',
-                    { className: 'ws-hint ws-mono' },
-                    form.server.trim()
-                      ? inviteOf(form.server, form.workspace)
-                      : '（填写服务器地址后生成邀请串）',
-                  ),
-                ),
-            h(
-              'div',
-              { className: 'ws-card', style: { marginTop: 12 } },
-              h(
-                'div',
-                { className: 'ws-row', style: { justifyContent: 'space-between' } },
-                h(
-                  'div',
-                  null,
-                  h(
-                    'div',
-                    {
-                      className: 'ws-pair-title',
-                      'data-presence': paired === true ? 'ok' : presence.state === 'error' ? 'bad' : 'idle',
-                    },
-                    pairTitle(),
-                  ),
-                  h('div', { className: 'ws-hint' }, pairHint()),
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'ws-btn',
-                    // 进房间中没必要重复点；其余状态都给一个手动重建的入口（网络卡住时用）
-                    disabled: presence.state === 'idle' || presence.state === 'connecting',
-                    title: '断开重连，重新进这个房间',
-                    onClick: () => setJoinNonce((n) => n + 1),
-                  },
-                  presence.state === 'waiting' || presence.state === 'matched' ? '重新加入' : '加入房间',
-                ),
-              ),
-            ),
+                  serverField,
+                  roomField,
+                  tokenField,
+                )
+              : h('div', null, serverField, roomField, tokenField, inviteCard),
+            probeCard,
           )
         }
         if (step === 1) {
@@ -2080,9 +1841,8 @@ window.__ModuleLoader__.load({
           ),
           h(
             'div',
-            { className: 'ws-card', style: { background: '#121315' } },
+            { className: 'ws-card' },
             h('div', { className: 'ws-sub', style: { marginBottom: 6 } }, '即将创建'),
-            // 分两行：目录一行、目标一行，避免长路径把「房间 xxx」挤到下一行只剩一个词
             h(
               'div',
               { style: { marginBottom: 4 } },
@@ -2095,7 +1855,12 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-sub' },
-              `⇄  ${shortServer(normalizeServer(form.server))}  ·  房间 ${form.workspace}`,
+              `⇄  ${shortServer(normalized)}  ·  房间 ${room}  ·  密钥 ${form.token.trim() ? '自定义' : '同房间码'}`,
+            ),
+            h(
+              'div',
+              { className: 'ws-sub', style: { marginTop: 4 } },
+              probe.state === 'accepted' ? '中继自检通过' : '未自检（不影响创建，同步失败时日志会说明原因）',
             ),
             issues.length > 0
               ? h(
@@ -2105,7 +1870,7 @@ window.__ModuleLoader__.load({
                 )
               : h(
                   'div',
-                  { style: { color: '#4CC38A', fontSize: 12, marginTop: 6 } },
+                  { style: { color: 'var(--ws-ok)', fontSize: 12, marginTop: 6 } },
                   '· 配置检查通过',
                 ),
           ),
@@ -2132,16 +1897,16 @@ window.__ModuleLoader__.load({
                   'button',
                   {
                     className: 'ws-btn ws-btn-primary',
-                    disabled: issues.length > 0,
+                    disabled: issues.length > 0 || blocked,
                     title:
                       issues.length > 0
                         ? issues.join('；')
-                        : canProceed
-                          ? ''
-                          : '没检测到对端也能继续；任务建好后会自动尝试同步',
+                        : blocked
+                          ? probeHint()
+                          : '',
                     onClick: () => setStep(step + 1),
                   },
-                  canProceed ? '下一步' : '下一步（未检测到对端）',
+                  '下一步',
                 )
               : h(
                   'button',

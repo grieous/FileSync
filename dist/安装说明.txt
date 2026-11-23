@@ -1,36 +1,34 @@
-WinSync / dsh-winsync 发布包（2026-11-23，插件 0.5.4 / 中继 0.5）
+WinSync / dsh-winsync 发布包（2026-11-23，插件 0.6.0 / 中继 0.5）
 
 一、只装 dsh 插件（Windows，推荐）
-  dsh plugin --profile desktop add "本目录\dsh-winsync-0.5.4.tgz"
+  dsh plugin --profile desktop add "本目录\dsh-winsync-0.6.0.tgz"
   重启 dsh → 左侧栏「文件同步」。
-  插件包里带的是 winsync-daemon.exe.gz（bin/ 下，2.8 MB），不需要另外放文件。
-  首次打开面板时插件会把它展开到 %LOCALAPPDATA%\dsh-winsync\bin\ 再拉起 daemon。
+  插件包里自带 daemon（bin/winsync-daemon.exe.gz，首次运行展开到
+  %LOCALAPPDATA%\dsh-winsync\bin），不需要另外放文件。
 
-  从 0.5.1 及更早覆盖安装，请先退 dsh 并结束残留的 winsync-daemon 进程，再删掉
-  %USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-winsync，否则 pnpm 会报
-  EPERM（旧 exe 被占用删不掉）。0.5.2 起 daemon 不再从 node_modules 运行。
+二、怎么配对（0.6.0 起只有「邀请串」一个概念）
+  1. 一台机器点「创建同步任务」：填中继地址（如 192.168.3.222:18443），
+     房间码自动生成，密钥留空即可；点「复制邀请」把整串发给对方。
+     邀请串 = ws://IP:端口/ws?workspace=房间码&token=密钥
+  2. 另一台点「加入已有同步」，粘进去：地址、房间码、密钥三项自动填好。
+  3. 第一步会自动跑「自检」：由 daemon 连一次中继（只握手、不进房间）。
+     ✓ 中继已接受 = 地址/端口/房间码/密钥都对，可以继续；
+     ✗ 中继拒绝了密钥 = 中继配了 SYNC_ROOM_TOKENS，密钥要填那一把；
+     ✗ 连不上中继 = 端口写错（默认 8443）或防火墙。
+  4. 不需要两台机器同时开着：自检只验配置，不要求对端在线。
 
-  如果偏好里手动设过 binPath，会优先用那个；也可用环境变量 WINSYNC_DAEMON_BIN 覆盖。
-
-  装完怎么确认装的是哪一版：面板侧栏底部有版本角标（v0.5.4 · 提交短哈希），
-  点一下复制完整信息。同步服务没起来时它也照样显示。角标自带 +dirty 说明那是
-  未提交的工作区打的包。
-
-  配对的正确用法（0.5.4 起）：在第一步填好服务器和房间码就会自动进房间等对方，
-  对方一进来这里自动显示「配对已通过」，不需要两边同时点检测。对方若已经建好任务
-  （不在等待房间），3 秒后会提示「对端已建好任务」，直接继续即可。
-
-二、中继（Linux / Docker）
+三、中继（Linux / Docker）
   1. docker load < winsync-relay-0.5.tar.gz
   2. 开放配对（默认，靠随机房间码保密）：
        docker run -d --name winsync-relay -p 18443:8443 --restart=always \
          -e SYNC_RATE_LIMIT=30 winsync-relay:0.5
-  3. 需要固定口令时，加 -e SYNC_ROOM_TOKENS='{"default":"你的密钥"}'（配了就逐房间校验）
+  3. 需要固定口令时，加 -e SYNC_ROOM_TOKENS='{"default":"你的密钥"}'
+     （配了就逐房间校验，插件里的「密钥」要填同一把）
 
-三、文件
-  dsh-winsync-0.5.4.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
+四、文件
+  dsh-winsync-0.6.0.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
   winsync-relay-0.5.tar.gz     中继镜像（docker load 导入）
-  winsync-daemon.exe           单独一份 daemon（备用/绿色使用，插件包内已有）
+  winsync-daemon.exe           单独一份 daemon（备用；插件包内已有）
   winsync.exe                  命令行客户端（排查用）
   winsync-gui.exe              独立图形界面（不装 dsh 也能用）
   SHA256SUMS.txt               校验值

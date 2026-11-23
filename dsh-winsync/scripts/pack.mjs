@@ -148,15 +148,28 @@ if (createHash('sha256').update(restored).digest('hex') !== exeDigest) {
 }
 
 // ---------------------------------------------------------------- npm pack
-const packed = execFileSync('npm', ['pack', '--silent'], { cwd: staging, encoding: 'utf8' })
-  .trim()
-  .split('\n')
+// Windows 上 `npm` 是 npm.cmd，execFileSync 既不按 PATHEXT 补后缀、也不走 shell，
+// 直接写 'npm' 会 ENOENT（node 自己装在 portable 目录里时更明显）。
+// 用「当前 node + npm-cli.js」最稳，跟 PATH 里有没有 npm 无关。
+const npmCli = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
+const rawPack = existsSync(npmCli)
+  ? execFileSync(process.execPath, [npmCli, 'pack', '--silent'], { cwd: staging, encoding: 'utf8' })
+  : execFileSync('npm', ['pack', '--silent'], { cwd: staging, encoding: 'utf8', shell: process.platform === 'win32' })
+// npm 输出以换行结尾，行尾还可能带 CR；不 trim 就会 rename 到一个带 \n 的名字
+const packed = rawPack
+  .split(/\r?\n/)
+  .map((line) => line.trim())
   .filter(Boolean)
   .pop()
 const tgz = path.join(staging, packed)
 
 // 包里该有的都得有：pnpm 只认 files 白名单，漏一项就是装完少一个模块
-const listing = execFileSync('tar', ['-tzf', tgz], { encoding: 'utf8' })
+// 用相对文件名 + cwd：Git 自带的 GNU tar 会把 `C:////...` 当成远程主机名，
+// 报 "Cannot connect to C: resolve failed"。切到目录里再解就不带盘符了。
+const listing = execFileSync('tar', ['-tzf', path.basename(tgz)], {
+  cwd: path.dirname(tgz),
+  encoding: 'utf8',
+})
   .split('\n')
   .filter(Boolean)
   .map((line) => line.replace(/^package\//, ''))

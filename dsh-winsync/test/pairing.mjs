@@ -1,17 +1,18 @@
 /**
- * 配对逻辑测试：进配对步骤就「加入房间」，不是点按钮才去问一句。
+ * 配对交互测试：自检交给 daemon，浏览器不开 WebSocket。
  *
- * 原来的实现有个错位：生成校验码的那一端**并没有真的进房间**，它只在用户点
- * 「检测配对」时开一条 WS 问一句就走。于是另一端点检测时房间里只有自己，
- * 永远「对端不在线」，向导卡在第一步。
+ * 旧的实现（0.5.x）是「进向导就在浏览器里连中继、挂在 `<房间>::pair` 旁路房间里等对端」，
+ * 实测有两个走不通的地方：
+ *   1. 面板跑在 dsh 页面里，CSP / 混合内容会掐掉到 ws:// 中继的连接，
+ *      而同一台机器上的 daemon 连得好好的 → 用户看到「配对永远连不上」；
+ *   2. 它要求两端同时待在向导第一步，谁先建好任务谁就「不在等待房间」，
+ *      于是另一端永远等不到人。
  *
- * 这里用一个假中继（按 sync-server 的真实行为回 PeerStatus）验证新语义：
- *   1. 服务器 + 房间码一有效就发 Hello，房间名走旁路（真房间 + `::pair`），
- *      免得和 daemon 抢那 2 个位置
- *   2. 只连一条，device_id 固定（重连是替换自己，不是占第二个位）
- *   3. 对端进房间 → 自动变「配对已通过」，「下一步」解锁（不用点按钮）
- *   4. 对端离开 → 退回「等待对端」，「下一步」重新禁用
- *   5. 换服务器 / 关闭向导 → 主动离房（旧 socket 关掉）
+ * 新语义：进第一步就调 daemon 的 POST /api/probe，只做一次 WebSocket 握手
+ * （中继的密钥校验就在握手阶段），所以
+ *   - 握手成功 = 地址、端口、房间码、密钥四样都对；
+ *   - 不发 Hello、不占房间，不会把对端 daemon 当成同步对端；
+ *   - 结果只用于「别让用户带着错配置往下走」，不再拿「对端在线」当门禁。
  *
  * 用法（需要 react + react-dom + jsdom）：
  *   ln -s <有这些依赖的目录> node_modules && node test/pairing.mjs
@@ -19,127 +20,27 @@
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 import { JSDOM } from 'jsdom'
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
-const BUNDLE = process.env.WINSYNC_CLIENT ?? new URL('../lib/client.js', import.meta.url).pathname
+// 用 fileURLToPath：Windows 上 URL.pathname 会给出 /C:/…，readFileSync 拼成 C:\C:\…
+const BUNDLE = process.env.WINSYNC_CLIENT ?? fileURLToPath(new URL('../lib/client.js', import.meta.url))
 
-/* ------------------------------------------------------------ 假中继 */
+/* ------------------------------------------------------------ 假 daemon */
 
-const encode = (message) => {
-  const body = new TextEncoder().encode(JSON.stringify(message))
-  const frame = new Uint8Array(1 + body.length)
-  frame[0] = 0
-  frame.set(body, 1)
-  return frame
-}
-const decode = (data) => JSON.parse(new TextDecoder().decode(new Uint8Array(data).subarray(1)))
+const probes = [] // 每次 /api/probe 的请求体
+let probeReply = { state: 'accepted', message: '中继已接受：地址、房间码与密钥都对', elapsed_ms: 12 }
 
-const rooms = new Map() // room -> [socket]
-const hellos = [] // 每条 Hello 的原始内容
+/** 浏览器里一次 WebSocket 都不该建：配对的网络动作全部在 daemon 侧。 */
 const sockets = []
-
-function push(socket, message) {
-  socket.emit('message', { data: encode(message) })
-}
-
-/** 与 sync-server 的 join() 等价：同 device 替换、满 2 即配对、否则推 peer_online=false。 */
-function join(socket, room, device) {
-  const others = (rooms.get(room) ?? []).filter((s) => s.device !== device)
-  const old = (rooms.get(room) ?? []).find((s) => s.device === device)
-  if (old && old !== socket) push(old, { t: 'bye', reason: '同一设备重新连接，旧连接被替换' })
-  others.push(socket)
-  socket.device = device
-  socket.room = room
-  rooms.set(room, others)
-
-  if (others.length >= 2) {
-    for (const peer of others) {
-      push(peer, {
-        t: 'peer_status',
-        peer_online: true,
-        peer_device_id: others.find((s) => s !== peer)?.device ?? null,
-      })
-    }
-  } else {
-    push(socket, { t: 'peer_status', peer_online: false, peer_device_id: null })
-  }
-}
-
-function leave(socket) {
-  const list = rooms.get(socket.room) ?? []
-  const next = list.filter((s) => s !== socket)
-  rooms.set(socket.room, next)
-  for (const peer of next) push(peer, { t: 'peer_status', peer_online: false, peer_device_id: null })
-}
-
-class FakeSocket {
-  static CONNECTING = 0
-  static OPEN = 1
-  static CLOSING = 2
-  static CLOSED = 3
-
+class ForbiddenSocket {
   constructor(url) {
-    this.url = url
-    this.readyState = FakeSocket.CONNECTING
-    this.device = ''
-    this.room = ''
-    this.listeners = new Map()
-    sockets.push(this)
-    setTimeout(() => {
-      this.readyState = FakeSocket.OPEN
-      this.emit('open', {})
-    }, 0)
+    sockets.push(url)
+    throw new Error(`不应在浏览器里连中继：${url}`)
   }
-
-  addEventListener(type, fn, options) {
-    const list = this.listeners.get(type) ?? []
-    const entry = options?.once ? (event) => { fn(event); this.removeEventListener(type, entry) } : fn
-    list.push(entry)
-    this.listeners.set(type, list)
-  }
-
-  removeEventListener(type, fn) {
-    this.listeners.set(type, (this.listeners.get(type) ?? []).filter((entry) => entry !== fn))
-  }
-
-  emit(type, event) {
-    for (const fn of [...(this.listeners.get(type) ?? [])]) fn(event)
-  }
-
-  send(frame) {
-    if (this.readyState !== FakeSocket.OPEN) throw new Error('socket 未打开')
-    const message = decode(frame)
-    if (message.t === 'hello') {
-      hellos.push({ room: message.workspace_id, device: message.device_id })
-      join(this, message.workspace_id, message.device_id)
-    }
-  }
-
-  close() {
-    if (this.readyState === FakeSocket.CLOSED) return
-    this.readyState = FakeSocket.CLOSING
-    setTimeout(() => {
-      if (this.readyState === FakeSocket.CLOSED) return
-      this.readyState = FakeSocket.CLOSED
-      leave(this)
-      this.emit('close', {})
-    }, 0)
-  }
-
-  get closed() {
-    return this.readyState === FakeSocket.CLOSED
-  }
-}
-
-/** 造一个「对端」，直接以给定房间名进房（模拟另一台机器上的向导）。 */
-function externalPeer(room) {
-  const socket = new FakeSocket('ws://peer')
-  socket.readyState = FakeSocket.OPEN
-  join(socket, room, `ext-${Math.random().toString(16).slice(2, 8)}`)
-  return socket
 }
 
 /* ------------------------------------------------------------ 渲染环境 */
@@ -168,12 +69,12 @@ function setup() {
   }
   global.EventSource = EventSourceStub
   window.EventSource = EventSourceStub
-  global.WebSocket = FakeSocket
-  window.WebSocket = FakeSocket
+  global.WebSocket = ForbiddenSocket
+  window.WebSocket = ForbiddenSocket
 
   const state = {
     ok: true,
-    version: '0.5',
+    version: '0.6',
     device: 'probe',
     auto: true,
     data_dir: 'C:\\state',
@@ -183,16 +84,25 @@ function setup() {
   const self = {
     ok: true,
     plugin: 'dsh-winsync',
-    version: '0.5.3',
-    label: '0.5.3 · 6567fc7',
-    commit: '6567fc7',
+    version: '0.6.0',
+    label: '0.6.0',
+    commit: 'test',
     commitSource: 'package.json',
     dirty: false,
     dir: 'C:\\repo\\dsh-winsync',
   }
-  global.fetch = async (url) => {
+
+  global.fetch = async (url, init = {}) => {
     const target = String(url)
-    const body = target.includes('/state') ? state : target.includes('/version') ? self : { ok: true, rows: [] }
+    let body = { ok: true }
+    if (target.includes('/probe')) {
+      probes.push(JSON.parse(init.body ?? '{}'))
+      body = { ok: true, result: probeReply }
+    } else if (target.includes('/state')) {
+      body = state
+    } else if (target.includes('/version')) {
+      body = self
+    }
     return { ok: true, status: 200, text: async () => JSON.stringify(body) }
   }
   window.fetch = global.fetch
@@ -236,8 +146,7 @@ async function click(node) {
 }
 
 async function typeInto(node, value) {
-  // 必须用原型上的原生 setter：React 在实例上包了一层 tracker，走实例 setter 会把
-  // tracker 一起更新，React 反而认为「值没变」而不触发 onChange。
+  // 必须用原型上的原生 setter：React 在实例上包了一层 tracker
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
   await React.act(async () => {
     setter.call(node, value)
@@ -248,100 +157,104 @@ async function typeInto(node, value) {
 
 const byText = (selector, needle) => [...document.querySelectorAll(selector)].find((n) => (n.textContent ?? '').includes(needle))
 const nextButton = () => byText('.ws-btn', '下一步')
+const settle = () => React.act(async () => { await wait(900) })
 
 /* ------------------------------------------------------------ 开始 */
 
-// React 必须在「补齐 oninput 探针」之后才加载：它初始化时就把 isInputEventSupported 定死，
-// 之后再补属性也不认，受控输入会改走 change 兜底路径，jsdom 里就收不到 onChange。
+// React 必须在补齐 oninput 探针之后加载
 const win = setup()
 const React = (await import('react')).default
 const { createRoot } = await import('react-dom/client')
 
 await mount(win, React, createRoot)
 
-// 打开向导
 await click(byText('.ws-nav-item', '创建同步任务'))
 assert.ok(document.querySelector('.ws-modal'), '向导没打开')
 
 const serverInput = document.querySelector('input[placeholder^="192.168"]')
-assert.ok(serverInput, '没找到服务器地址输入框')
-const roomInput = [...document.querySelectorAll('.ws-modal input')].find((n) => /^[a-z0-9]{8,}$/i.test(n.value))
-assert.ok(roomInput, '没找到房间码输入框（默认应是自动生成的随机码）')
+assert.ok(serverInput, '没找到中继地址输入框')
+const roomInput = [...document.querySelectorAll('.ws-modal input')].find((n) => /^k[0-9a-f]{32}$/i.test(n.value))
+assert.ok(roomInput, '房间码没有默认生成（应是 k 开头的随机码）')
 const room = roomInput.value
 
-// 还没填服务器：不该连
-assert.equal(sockets.length, 0, '服务器为空时不该建立连接')
-assert.match(text(), /尚未加入房间/, '空地址时状态文案不对')
+// 地址为空时不该自检
+assert.equal(probes.length, 0, '地址为空时不该发自检请求')
+assert.match(text(), /尚未自检/, '空地址时的状态文案不对')
 
-// 填服务器 → debounce 450ms 后自动进房
+// 填地址 → 防抖后自动自检
 await typeInto(serverInput, '127.0.0.1:18443')
-await React.act(async () => {
-  await wait(700)
-})
+await settle()
+assert.equal(probes.length, 1, `应当只发一次自检，实际 ${probes.length}`)
+assert.equal(probes[0].server, 'ws://127.0.0.1:18443/ws', `自检地址没补全：${probes[0].server}`)
+assert.equal(probes[0].workspace, room, '自检没带房间码')
+assert.equal(probes[0].token, room, '密钥留空时应当跟随房间码')
+assert.match(text(), /中继已接受这组配置/, '握手成功后没显示「中继已接受」')
+assert.equal(nextButton().disabled, false, '自检通过后「下一步」必须可点')
+assert.equal(sockets.length, 0, '不应该在浏览器里连中继')
+console.log('PASS 填地址自动调 daemon 自检（带 workspace + token），浏览器不开 WS')
 
-assert.equal(sockets.length, 1, `应当只建一条等待连接，实际 ${sockets.length}`)
-assert.equal(hellos.length, 1, '没有发出 Hello')
-assert.equal(hellos[0].room, `${room}::pair`, `等待房间应是旁路房间，实际 ${hellos[0].room}`)
-assert.match(hellos[0].device, /^dsh-ui-/, '等待连接的 device_id 应是固定的 dsh-ui- 前缀')
-assert.match(text(), /已在房间等待对端/, '进房后没有显示「等待对端」')
-// 没配对上也要能继续：对方很可能已经建好任务，不能因为等不到就把人锁死
-assert.equal(nextButton().disabled, false, '未检测到对端时「下一步」也不该禁用')
-assert.match(nextButton().textContent, /未检测到对端/, '按钮没提示「未检测到对端」')
-console.log('PASS 填好地址即自动进房（房间走 ::pair 旁路，device_id 固定）')
-
-// 对端进房 → 自动配对通过
-let peer
+// 自检通过 ≠ 对端在线：这里没有任何「等对端」的概念，照样能往下走
 await React.act(async () => {
-  peer = externalPeer(`${room}::pair`)
-  await wait(30)
+  await wait(3000)
 })
-assert.match(text(), /配对已通过/, '对端进房后没有自动变成「配对已通过」')
-assert.equal(nextButton().disabled, false, '配对通过后「下一步」应当解锁')
-assert.match(nextButton().textContent, /^下一步$/, '配对通过后按钮文案应当回到「下一步」')
-console.log('PASS 对端进房即自动配对通过，「下一步」解锁（无需点检测）')
+assert.equal(nextButton().disabled, false, '没有对端在线也必须能继续（以前就是卡在这里）')
+console.log('PASS 不要求对端在线：自检通过即可继续')
 
-// 对端离开 → 回到等待
-await React.act(async () => {
-  peer.close()
-  await wait(30)
-})
-assert.match(text(), /已在房间等待对端/, '对端离开后没有退回等待状态')
-assert.match(nextButton().textContent, /未检测到对端/, '对端离开后按钮没退回提示态')
-console.log('PASS 对端离开后退回等待，按钮退回提示态')
+// 中继拒绝密钥 → 明确说原因，并拦住
+probeReply = { state: 'denied', message: '中继拒绝了这组密钥：房间码或密钥与中继配置不一致', elapsed_ms: 9 }
+await click(byText('.ws-btn', '重新自检'))
+await settle()
+assert.match(text(), /中继拒绝了密钥/, '被 401 时没有明确说「密钥不对」')
+assert.equal(nextButton().disabled, true, '配置被中继拒绝时应当拦住「下一步」')
+assert.match(nextButton().title, /密钥/, '禁用原因没写在 title 上')
+console.log('PASS 401 明确提示「密钥不对」，并拦住下一步')
 
-// 对方已建好任务：真房间里有 daemon，等待房间没人 → 等 3 秒探测后如实说出来
-const daemonPeer = externalPeer(room)
-await React.act(async () => {
-  await wait(3400)
-})
-assert.match(text(), /对端已建好任务/, '没识别出「对端已在真房间」的情况')
-assert.match(text(), /直接继续建任务/, '没给出继续的指引')
-assert.equal(nextButton().disabled, false, '识别到对端已建任务后应当可以继续')
-await React.act(async () => {
-  daemonPeer.close()
-  await wait(30)
-})
-console.log('PASS 等待房间没人时，去真房间探测到「对端已建好任务」')
+// 连不上 → 同样拦住，并提示检查端口
+probeReply = { state: 'unreachable', message: '连不上 ws://127.0.0.1:18443/ws', elapsed_ms: 2000 }
+await click(byText('.ws-btn', '重新自检'))
+await settle()
+assert.match(text(), /连不上中继/, '连不上时没有明确提示')
+assert.equal(nextButton().disabled, true, '连不上中继时应当拦住「下一步」')
+console.log('PASS 连不上中继时拦住下一步')
 
-// 换服务器 → 旧连接应当被关掉，不能两条并存
-const first = sockets[0]
-await typeInto(serverInput, '127.0.0.1:18444')
-await React.act(async () => {
-  await wait(700)
-})
-assert.equal(first.closed, true, '换服务器后旧连接没有关闭（会白占房间位）')
-assert.ok(sockets.length >= 2, '换服务器后没有建立新连接')
-assert.equal(sockets.filter((s) => !s.closed).length, 1, '同时应当只有一条等待连接')
-assert.equal(hellos[hellos.length - 1].room, `${room}::pair`, '换服务器后房间名不该变')
-console.log('PASS 换服务器会重建连接，且始终只有一条')
+// 恢复 → 可以继续进第二步
+probeReply = { state: 'accepted', message: '中继已接受：地址、房间码与密钥都对', elapsed_ms: 11 }
+await click(byText('.ws-btn', '重新自检'))
+await settle()
+assert.equal(nextButton().disabled, false, '恢复正常后仍被禁用')
+await click(nextButton())
+assert.match(text(), /本机同步目录/, '没进到第二步')
+console.log('PASS 自检恢复后可以进第二步')
 
-// 关向导 → 离房
+// 回到第一步，改「加入已有同步」：粘邀请串要带出 server / 房间 / 密钥
+await click(byText('.ws-btn', '上一步'))
+await click(byText('.ws-tab', '加入已有同步'))
+const joinInput = [...document.querySelectorAll('.ws-modal input')].find((n) => (n.placeholder ?? '').includes('workspace='))
+assert.ok(joinInput, '没找到邀请串输入框')
+await typeInto(joinInput, 'ws://10.0.0.5:19000/ws?workspace=kdeadbeefcafe&token=s3cret')
+await settle()
+const joinServer = [...document.querySelectorAll('.ws-modal input')].find((n) => n.value === '10.0.0.5:19000')
+assert.ok(joinServer, '粘邀请串没有带出中继地址')
+const joinRoom = [...document.querySelectorAll('.ws-modal input')].find((n) => n.value === 'kdeadbeefcafe')
+assert.ok(joinRoom, '粘邀请串没有带出房间码')
+const last = probes[probes.length - 1]
+assert.equal(last.workspace, 'kdeadbeefcafe', '自检用的房间码不对')
+assert.equal(last.token, 's3cret', '自定义密钥没从邀请串里解出来')
+assert.equal(last.server, 'ws://10.0.0.5:19000/ws', '自检用的地址不对')
+console.log('PASS 粘邀请串带出 server / 房间 / 密钥，自检用的就是这三样')
+
+// 旧版 6 位配对码仍然认，但要展开成 pair-xxxxxx
+await typeInto(joinInput, '123456')
+await settle()
+const legacy = [...document.querySelectorAll('.ws-modal input')].find((n) => n.value === 'pair-123456')
+assert.ok(legacy, '6 位旧配对码没有展开成 pair-123456')
+assert.equal(probes[probes.length - 1].workspace, 'pair-123456', '旧配对码的自检房间不对')
+console.log('PASS 旧 6 位配对码兼容为 pair-xxxxxx 房间')
+
+// 关掉向导
 await click(byText('.ws-btn', '取消'))
-await React.act(async () => {
-  await wait(50)
-})
-assert.ok(sockets.every((s) => s.closed), '关掉向导后还有连接没断（会一直占着房间）')
 assert.equal(document.querySelector('.ws-modal'), null, '向导没有关闭')
-console.log('PASS 关闭向导会主动离房')
+assert.equal(sockets.length, 0, '整个流程都不该有浏览器直连中继')
+console.log('PASS 关闭向导，全程 0 条浏览器 WebSocket')
 
 console.log('pairing: 全部通过')
