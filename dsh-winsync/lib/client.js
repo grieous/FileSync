@@ -85,6 +85,10 @@ window.__ModuleLoader__.load({
 .ws-ver[data-dirty="true"]:hover{color:#E0B73A}
 .ws-ver:focus{outline:none}
 .ws-ver:focus-visible{outline:2px solid var(--ws-accent);outline-offset:1px}
+/* 配对状态：ok=两端已在同一房间，bad=进房间失败（房间满/地址错/中继要求密钥） */
+.ws-pair-title{font-weight:600}
+.ws-pair-title[data-presence="ok"]{color:#4CC38A}
+.ws-pair-title[data-presence="bad"]{color:#F0554D}
 .ws-content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .ws-scroll{overflow:auto;padding:18px 24px 32px;flex:1}
 .ws-scroll::-webkit-scrollbar,.ws-raw-body::-webkit-scrollbar{width:8px;height:8px}
@@ -376,60 +380,212 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 直连中继探测「房间里有没有对端」：浏览器开一条 WS，发 Hello，等 PeerStatus。
-     * 只用于向导里的「检测配对」，不参与真正的同步（同步由 daemon 做）。
+     * 配对用的旁路房间名。
+     *
+     * 中继一个房间最多 2 端。如果「等对端」的连接直接挂在真房间里，就会和正在同步的
+     * daemon 抢位：要么把对方挤掉，要么被对方的 daemon 当成同步对端——对面发来
+     * IndexDigest，这边根本不会回应，最后白等一轮超时。加个后缀开旁路房间，
+     * 既不冲突，也不打扰正在跑的任务。两端用同一规则派生，所以照样能相遇。
      */
-    function probePeer(url, room, timeoutMs = 8000) {
-      return new Promise((resolve, reject) => {
-        let settled = false
-        let ws
+    const WAITING_SUFFIX = '::pair'
+    function waitingRoom(room) {
+      return `${String(room ?? '').trim()}${WAITING_SUFFIX}`
+    }
+
+    /** 控制帧：1 字节类型（0=控制）+ JSON，与 daemon/中继用的是同一套帧格式。 */
+    function encodeControl(message) {
+      const body = new TextEncoder().encode(JSON.stringify(message))
+      const frame = new Uint8Array(1 + body.length)
+      frame[0] = 0
+      frame.set(body, 1)
+      return frame
+    }
+
+    function decodeControl(data) {
+      try {
+        const bytes = new Uint8Array(data)
+        if (bytes[0] !== 0) return null
+        return JSON.parse(new TextDecoder().decode(bytes.subarray(1)))
+      } catch {
+        return null
+      }
+    }
+
+    // 同一页面生命周期内固定：断线重连时中继会踢掉自己那条旧连接（同 device_id 替换），
+    // 而不是把本就只有两个的位置再占掉一个。
+    const PRESENCE_DEVICE = `dsh-ui-${Math.random().toString(16).slice(2, 10)}`
+
+    /**
+     * 「加入房间等着」，不是拍一张照就走。
+     *
+     * 之前是点「检测配对」才开一条 WS、发个 Hello、拿到一条 PeerStatus 就关。
+     * 这意味着双方必须**恰好在那 8 秒窗口里同时点**才可能互见；而生成校验码的那一端
+     * 压根没进房间，所以另一端怎么点都只有自己——这就是那个错位的根源。
+     *
+     * 现在只要服务器与房间码有效就常驻。中继在第二端入房时会给房间里的两端各推一条
+     * PeerStatus，有人离开时也会推 peer_online=false，所以谁先谁后都能互相看见，
+     * 不需要掐时间点。心跳 20 秒一次，与 daemon 一致（中继 180 秒无数据就当僵尸踢）。
+     *
+     * @param {(next: {state: string, detail: string}) => void} handlers.onStatus
+     * @param {(online: boolean, peer: string) => void} handlers.onPeer
+     */
+    function openPresence(url, room, handlers) {
+      const target = waitingRoom(room)
+      let socket = null
+      let heartbeat = null
+      let retryTimer = null
+      let attempt = 0
+      let stopped = false
+
+      const report = (state, detail = '') => {
+        if (!stopped) handlers.onStatus({ state, detail })
+      }
+      const clearTimers = () => {
+        if (heartbeat) clearInterval(heartbeat)
+        if (retryTimer) clearTimeout(retryTimer)
+        heartbeat = null
+        retryTimer = null
+      }
+
+      const connect = () => {
+        if (stopped) return
+        report(attempt === 0 ? 'connecting' : 'retrying')
         try {
-          ws = new WebSocket(url)
-        } catch (e) {
-          reject(new Error('地址无效'))
+          socket = new WebSocket(url)
+        } catch {
+          report('error', '服务器地址无效')
           return
         }
-        ws.binaryType = 'arraybuffer'
-        const fail = (msg) => {
+        socket.binaryType = 'arraybuffer'
+
+        socket.addEventListener('open', () => {
+          attempt = 0
+          socket.send(
+            encodeControl({ t: 'hello', device_id: PRESENCE_DEVICE, workspace_id: target, proto_ver: 1 }),
+          )
+          heartbeat = setInterval(() => {
+            try {
+              socket.send(encodeControl({ t: 'keep_alive' }))
+            } catch {
+              /* 断开由 close 处理 */
+            }
+          }, 20000)
+        })
+
+        socket.addEventListener('message', (event) => {
+          const message = decodeControl(event.data)
+          if (!message) return
+          if (message.t === 'peer_status') {
+            const online = !!message.peer_online
+            report(online ? 'matched' : 'waiting')
+            handlers.onPeer(online, message.peer_device_id || '')
+          } else if (message.t === 'bye') {
+            // 房间满 / 协议不符：重连也没用，停下来并把原因说清楚
+            clearTimers()
+            stopped = true
+            report('error', message.reason || '被中继断开')
+            try {
+              socket.close()
+            } catch {
+              /* 已经关了 */
+            }
+          }
+        })
+
+        socket.addEventListener('error', () => {
+          report('error', '连不上中继，检查地址和端口')
+        })
+
+        socket.addEventListener('close', () => {
+          clearTimers()
+          if (stopped) return
+          attempt = Math.min(attempt + 1, 6)
+          report('retrying', `${((attempt * 400) / 1000).toFixed(1)} 秒后重试`)
+          retryTimer = setTimeout(connect, attempt * 400)
+        })
+      }
+
+      connect()
+
+      return {
+        /** 主动离开房间：中继会给房间里的另一端推 peer_online=false。 */
+        close() {
+          return new Promise((resolve) => {
+            stopped = true
+            clearTimers()
+            if (!socket || socket.readyState === WebSocket.CLOSED) {
+              resolve()
+              return
+            }
+            socket.addEventListener('close', () => resolve(), { once: true })
+            try {
+              socket.close()
+            } catch {
+              resolve()
+            }
+            // 浏览器把 socket 挂起时也不能卡住「创建」
+            setTimeout(resolve, 800)
+          })
+        },
+      }
+    }
+
+    // 一次性探测用另一个设备号：它只在真房间里停留几百毫秒，别和等待连接混在一起
+    const PROBE_DEVICE = `dsh-probe-${Math.random().toString(16).slice(2, 10)}`
+
+    /**
+     * 快速看一眼真房间里有没有人——用于「对端已经建好任务、不在等待房间」的情况。
+     *
+     * 只发 Hello、拿到一条 PeerStatus 就走了，最多停 1.5 秒。对方的 daemon 会看到
+     * 一次「对端上线又离开」，但它本来就在等对端，不会因此报错；比起让用户卡在
+     * 「等待对端」永远进不去，这点扰动可以接受。
+     *
+     * 返回 true / false / null（超时、连不上、被踢）。
+     */
+    function probeOnce(url, room, timeoutMs = 1500) {
+      return new Promise((resolve) => {
+        let settled = false
+        let socket = null
+        const finish = (value) => {
           if (settled) return
           settled = true
-          try { ws.close() } catch {}
-          reject(new Error(msg))
-        }
-        const timer = setTimeout(() => fail('超时，没等到中继回应'), timeoutMs)
-        ws.addEventListener('open', () => {
-          const hello = {
-            t: 'hello',
-            device_id: `probe-${Math.random().toString(16).slice(2, 10)}`,
-            workspace_id: room,
-            proto_ver: 1,
-          }
-          const body = new TextEncoder().encode(JSON.stringify(hello))
-          const frame = new Uint8Array(1 + body.length)
-          frame[0] = 0
-          frame.set(body, 1)
-          ws.send(frame)
-        })
-        ws.addEventListener('message', (e) => {
           try {
-            const msg = JSON.parse(new TextDecoder().decode(new Uint8Array(e.data).subarray(1)))
-            if (msg.t === 'peer_status') {
-              clearTimeout(timer)
-              settled = true
-              try { ws.close() } catch {}
-              resolve({ online: !!msg.peer_online, peer: msg.peer_device_id || '' })
-            }
+            socket?.close()
           } catch {
-            /* 其它帧忽略 */
+            /* 已经关了 */
+          }
+          resolve(value)
+        }
+        try {
+          socket = new WebSocket(url)
+        } catch {
+          resolve(null)
+          return
+        }
+        socket.binaryType = 'arraybuffer'
+        const timer = setTimeout(() => finish(null), timeoutMs)
+        socket.addEventListener('open', () => {
+          socket.send(
+            encodeControl({ t: 'hello', device_id: PROBE_DEVICE, workspace_id: room, proto_ver: 1 }),
+          )
+        })
+        socket.addEventListener('message', (event) => {
+          const message = decodeControl(event.data)
+          if (message?.t === 'peer_status') {
+            clearTimeout(timer)
+            finish(!!message.peer_online)
+          } else if (message?.t === 'bye') {
+            clearTimeout(timer)
+            finish(null)
           }
         })
-        ws.addEventListener('error', () => {
+        socket.addEventListener('error', () => {
           clearTimeout(timer)
-          fail('连不上中继，检查地址和端口')
+          finish(null)
         })
-        ws.addEventListener('close', () => {
+        socket.addEventListener('close', () => {
           clearTimeout(timer)
-          fail('连接被关闭：房间可能已满，或中继要求密钥')
+          finish(null)
         })
       })
     }
@@ -1419,8 +1575,14 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [entry, setEntry] = React.useState('create')
       const [paired, setPaired] = React.useState(null)
-      const [checking, setChecking] = React.useState(false)
       const [peerId, setPeerId] = React.useState('')
+      // idle / connecting / waiting / matched / retrying / error
+      const [presence, setPresence] = React.useState({ state: 'idle', detail: '' })
+      // 「对端已建好任务」的旁证：等待房间没人时，去真房间看一眼
+      const [roomPeer, setRoomPeer] = React.useState(null)
+      // 「重新加入」的计数器：只用来重建连接，不改房间
+      const [joinNonce, setJoinNonce] = React.useState(0)
+      const presenceRef = React.useRef(null)
       const copyInvite = async () => {
         const text = inviteOf(form.server, form.workspace)
         try {
@@ -1444,30 +1606,109 @@ window.__ModuleLoader__.load({
         ext: '',
       })
 
-      // 服务器或房间码一变，之前的「已配对」结论就不算数了
+      /**
+       * 进入配对步骤就「加入房间」，不再等用户点按钮。
+       *
+       * 这是那个错位的关键：以前生成校验码之后本地并没有进房间，另一端点「检测配对」时
+       * 房间里只有它自己，于是永远「对端不在线」。现在只要服务器与房间码有效就挂着等，
+       * 两端谁先谁后都能互见，配对自动完成。
+       *
+       * 只在第一步挂着：进了第二步还占着的话，对方 daemon 连上真房间时这边会被当成
+       * 同步对端（我们不回任何同步帧），对方会白等一轮。旁路房间见 waitingRoom()。
+       */
       React.useEffect(() => {
         setPaired(null)
         setPeerId('')
-      }, [form.server, form.workspace])
-
-      const checkPairing = async () => {
+        setRoomPeer(null)
         const url = normalizeServer(form.server)
-        if (!url || !form.workspace.trim()) return store.notify('先填服务器和房间码', 'bad')
-        setChecking(true)
-        setPaired(null)
-        try {
-          const info = await probePeer(url, form.workspace)
-          setPaired(info.online)
-          setPeerId(info.peer)
-          if (!info.online) {
-            store.notify('对端还没上线：让对方用同一个房间码（或 6 位配对码）连上再点一次', 'warn')
-          }
-        } catch (e) {
-          setPaired(false)
-          store.notify(`检测失败：${e.message}`, 'bad')
-        } finally {
-          setChecking(false)
+        const room = form.workspace.trim()
+        if (step !== 0 || busy || !url || !room) {
+          setPresence({ state: 'idle', detail: '' })
+          return undefined
         }
+        let alive = true
+        // 房间码是一个字一个字敲出来的，等停顿再连，别把中继的连接配额刷爆
+        const delay = setTimeout(() => {
+          if (!alive) return
+          presenceRef.current = openPresence(url, room, {
+            onStatus: (next) => {
+              if (alive) setPresence(next)
+            },
+            onPeer: (online, peer) => {
+              if (!alive) return
+              setPaired(online)
+              setPeerId(peer)
+            },
+          })
+        }, 450)
+        return () => {
+          alive = false
+          clearTimeout(delay)
+          void presenceRef.current?.close()
+          presenceRef.current = null
+        }
+      }, [form.server, form.workspace, step, busy, joinNonce])
+
+      /**
+       * 等待房间里一直没人时，隔 3 秒去真房间看一眼。
+       *
+       * 为什么需要：对方很可能**已经建好任务**了——它的等待连接在进入第二步时就撤了，
+       * 房间里只剩 daemon。这时在等待房间等一辈子也等不到，用户会以为配对坏了。
+       * 这种情况不该拦着不让建任务，所以只做一次轻量探测，把「对端已建好」如实说出来。
+       *
+       * 本机已有同房间任务时跳过：真房间里的「对端」就是自己，不算证据。
+       */
+      React.useEffect(() => {
+        if (presence.state !== 'waiting') return undefined
+        const url = normalizeServer(form.server)
+        const room = form.workspace.trim()
+        if (!url || !room) return undefined
+        let alive = true
+        const timer = setTimeout(async () => {
+          if (!alive) return
+          const mine = (store.data?.tasks ?? []).some(
+            (task) => task.workspace === room && normalizeServer(task.server) === url,
+          )
+          if (mine) {
+            setRoomPeer('self')
+            return
+          }
+          const online = await probeOnce(url, room)
+          if (alive) setRoomPeer(online)
+        }, 3000)
+        return () => {
+          alive = false
+          clearTimeout(timer)
+        }
+      }, [presence.state, form.server, form.workspace, store.data])
+
+      const pairTitle = () => {
+        if (paired === true) return `配对已通过${peerId ? ` · 对端 ${peerId.slice(0, 8)}` : ''}`
+        if (presence.state === 'error') return `加入房间失败：${presence.detail || '未知原因'}`
+        if (roomPeer === true) return '对端已建好任务，不在等待房间'
+        if (presence.state === 'waiting') return '已在房间等待对端…'
+        if (presence.state === 'connecting') return '正在加入房间…'
+        if (presence.state === 'retrying') return '连接断开，正在重新加入…'
+        return '尚未加入房间'
+      }
+
+      const pairHint = () => {
+        if (paired === true) {
+          return '两端已在同一房间；校验码一致就可以进下一步设置目录。'
+        }
+        if (roomPeer === true) {
+          return '对方的任务已经在同步，所以它不会待在等待房间。直接继续建任务即可，两端用同一个房间码就会自动同步。'
+        }
+        if (roomPeer === 'self') {
+          return '这个房间里有本机已建好的任务，无法用它判断对端。要继续就换个房间码，或者照样建（两端房间码一致即可）。'
+        }
+        if (presence.state === 'waiting') {
+          return '把邀请发给对方。对方一进这个房间，这里会自己变成「配对已通过」，不用再点检测。'
+        }
+        if (presence.state === 'error') {
+          return '检查服务器地址与端口；中继要求密钥时，任务的密钥也必须与房间里那把一致。'
+        }
+        return '填好服务器与房间码后会自动加入房间等待对端，不用手动点检测。'
       }
 
       const issues = []
@@ -1483,9 +1724,17 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 配对上不等于不能继续：对方可能已经建好任务（不在等待房间），也可能就是先建后连。
+      // 真正会出问题的只有「两端房间码不一致」——那种情况任务建好后会在同步时报出来。
+      const canProceed = paired === true || roomPeer === true
+
       const create = async () => {
         setBusy(true)
         try {
+          // 先退出「等待对端」的连接：daemon 马上要连真房间，别和它抢那 2 个位置。
+          // close() 会等 socket 真的关掉（最多 800ms），不是「发了关闭帧就走」。
+          await presenceRef.current?.close()
+          presenceRef.current = null
           await store.run(
             () =>
               api('/tasks', {
@@ -1742,28 +1991,25 @@ window.__ModuleLoader__.load({
                   null,
                   h(
                     'div',
-                    { style: { fontWeight: 600 } },
-                    paired === true
-                      ? `配对已通过${peerId ? ` · 对端 ${peerId.slice(0, 8)}` : ''}`
-                      : paired === false
-                        ? '对端不在线'
-                        : '尚未检测配对',
+                    {
+                      className: 'ws-pair-title',
+                      'data-presence': paired === true ? 'ok' : presence.state === 'error' ? 'bad' : 'idle',
+                    },
+                    pairTitle(),
                   ),
-                  h(
-                    'div',
-                    { className: 'ws-hint' },
-                    '两端必须在同一个房间；配对通过后才能进入下一步设置目录',
-                  ),
+                  h('div', { className: 'ws-hint' }, pairHint()),
                 ),
                 h(
                   'button',
                   {
                     type: 'button',
                     className: 'ws-btn',
-                    disabled: checking,
-                    onClick: () => void checkPairing(),
+                    // 进房间中没必要重复点；其余状态都给一个手动重建的入口（网络卡住时用）
+                    disabled: presence.state === 'idle' || presence.state === 'connecting',
+                    title: '断开重连，重新进这个房间',
+                    onClick: () => setJoinNonce((n) => n + 1),
                   },
-                  checking ? '检测中…' : '检测配对',
+                  presence.state === 'waiting' || presence.state === 'matched' ? '重新加入' : '加入房间',
                 ),
               ),
             ),
@@ -1886,11 +2132,16 @@ window.__ModuleLoader__.load({
                   'button',
                   {
                     className: 'ws-btn ws-btn-primary',
-                    disabled: issues.length > 0 || !paired,
-                    title: issues.length > 0 ? issues.join('；') : paired ? '' : '先点「检测配对」，确认对端在线',
+                    disabled: issues.length > 0,
+                    title:
+                      issues.length > 0
+                        ? issues.join('；')
+                        : canProceed
+                          ? ''
+                          : '没检测到对端也能继续；任务建好后会自动尝试同步',
                     onClick: () => setStep(step + 1),
                   },
-                  paired ? '下一步' : '下一步（先完成配对）',
+                  canProceed ? '下一步' : '下一步（未检测到对端）',
                 )
               : h(
                   'button',

@@ -110,7 +110,13 @@ dsh plugin --profile desktop install --force
 - **服务器地址只填 IP 或 IP:端口**（如 `192.168.3.222` 或 `192.168.3.222:18443`），协议头、`/ws`
   和不填端口时的默认 8443 自动补全；输入框里也只回显 `host:port`，老配置里的完整 `ws://…/ws` 照样接受；
 - 同步日志表格带 **序号**，文件列显示**磁盘绝对路径**（任务目录 + 相对路径），长路径换行不省略；
-- **配对通过才能继续**：第一步底部有「检测配对」，直连中继确认对端在线后才解锁「下一步」；
+- **进配对步骤即加入房间**：服务器与房间码一有效就常驻中继等对端，对端一进来自动变
+  「配对已通过」——不需要两个人掐同一个时间点去点检测。
+  等待用的是旁路房间（`<房间码>::pair`），不占 daemon 的同步房间位，也不会被对方的 daemon
+  误当同步对端；离开第一步、关向导、点「创建」时都会主动离房。
+- **对方已经建好任务时也能过**：等待房间没人时，3 秒后会去真房间看一眼，识别出
+  「对端已建好任务，不在等待房间」并放行。「下一步」不再强制配对——真正会出问题的只有两端
+  房间码不一致，那种情况同步时会明确报出来，不该把用户锁在第一步。
 - **跟随 dsh 主题**：读 `body[data-ds-dark-theme]`，深浅色自动切换（换肤只改一组 CSS 变量）；
 - **新建任务分两个入口**：「加入已有同步」（粘邀请串或 6 位配对码，自动填服务器与房间）和
   「创建新同步」（自动生成房间码、一键复制邀请）；
@@ -192,6 +198,7 @@ npm run pack
 | 覆盖安装报 `ERR_PNPM_EPERM … dsh-winsync_tmp_<pid>_<n>\bin` | daemon 是不是正在从 `node_modules\dsh-winsync\bin` 里跑（`Get-Process winsync-daemon`），或杀软在拦 `node_modules` 里的 exe | 0.5.2 起运行点是 `<state>\bin`，新装不会再犯。从 0.5.1 及更早升级的这一次先退 dsh、`Stop-Process -Name winsync-daemon -Force`、删掉旧 `node_modules\dsh-winsync`（含 `dsh-winsync_tmp_*`）再装 |
 | 左侧栏没有「同步」 | `dsh plugin --profile <p> list` 里有没有 `dsh-winsync`；浏览器 console 有没有模块加载错误 | 少东西就重装：删 `~/.dsh/profiles/<p>/node_modules/dsh-winsync` 再 `dsh plugin --profile <p> install --force` |
 | 面板打开是「同步服务不可用」 | 面板「设置 → 诊断」里的 `daemon` 段；`%LOCALAPPDATA%\dsh-winsync\daemon.json` 是否存在 | 点「重试」；仍失败就看 daemon 日志（`<state>\logs\`） |
+| 向导第一步一直停在「已在房间等待对端」 | 对方是不是还没进这个房间（房间码/配对码是否一致）；「加入房间失败」时看后面的原因 | 改成同一个房间码（或生成 6 位配对码让对方输）就会自动通过。3 秒后会自动去真房间看一眼：若提示「对端已建好任务」，说明对方已经在同步了，直接继续即可。第 2 步起本地会主动离房，对方此刻再开向导看不到你——这是有意的，daemon 马上要接管房间 |
 | 提示 `daemon-missing` | 诊断里的 `daemon.seed`、包内 `bin\winsync-daemon.exe.gz`、`<state>\bin\`、`Program Files\WinSync\`、`PATH` | `cargo build -p sync-daemon --release` 后把 exe 放进 `<state>\bin\`，或重新 `npm run pack` 打一个自带种子的包，或在设置里填绝对路径 |
 | 诊断里 `daemon.seed.error` 是 `EBUSY`/`EPERM` | 状态目录里的旧 exe 正在跑，种子换不上去 | 正常（沿用旧副本）；要让新 exe 生效就退 dsh 再启动一次 |
 | 改了界面却不生效 | **先看侧栏底部的版本角标**：版本与 commit 是不是你以为的那一版 | 客户端 bundle 在页面加载时注入，**必须重启 dsh**；重装前记得删旧的 `node_modules/dsh-winsync`（pnpm 会硬链旧快照） |
@@ -210,6 +217,8 @@ node test/p2-smoke.mjs       # 宿主：路由、代理、CRUD 透传、SSE、�
 node test/seed-binary.mjs    # 包内种子展开：字节一致、幂等、换种子重展开、坏种子不致命
 node test/version.mjs        # /version：不依赖 daemon、版本与 package.json 一致、commit 形状合法
 node test/version-ui.mjs     # 版本角标（需 react/jsdom）：显示、复制、接口挂了不拖垮面板
+node test/pairing.mjs        # 配对（需 react/jsdom）：进房即配对、对端离开回退、对端已建任务、换地址重建、关窗离房
+node test/pairing-e2e.mjs    # 配对（需先起 sync-server）：真中继下两端互见、旁路房间不干扰真房间
 node test/cdp-inspect.mjs <url> [port] [--aria=同步]   # 真实页面里的渲染与截图
 
 # 同步本体（双端、安全阀、限速、与 exe 的隔离）在仓库根的 sync/tools/
