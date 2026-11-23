@@ -42,3 +42,6 @@ dsh-winsync/node_modules/
 
 # 插件包内嵌的 daemon 二进制（构建产物，发布时打进 tgz，不进版本库）
 dsh-winsync/bin/*.exe
+
+# 发布压缩包（dist/ 的 zip 版，本地留档）
+dist.zip
