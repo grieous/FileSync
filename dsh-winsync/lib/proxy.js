@@ -84,7 +84,6 @@ export function createApiHandler(manager) {
         plugin: 'dsh-winsync',
         api: '/winsync/api',
         version: pluginInfo.version,
-        commit: pluginInfo.commit,
         runtimeDir: manager.dir,
         daemon: manager.snapshot(),
       })
@@ -104,7 +103,6 @@ export function createApiHandler(manager) {
         ok: true,
         plugin: 'dsh-winsync',
         version: pluginInfo.version,
-        commit: pluginInfo.commit,
         runtimeDir: manager.dir,
         prefsPath: manager.snapshot().prefsPath,
         handshake: redactHandshake(manager.peekHandshake()),

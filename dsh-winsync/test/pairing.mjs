@@ -43,6 +43,9 @@ class ForbiddenSocket {
   }
 }
 
+/** 「复制邀请」写进来的文本，用来核对邀请串格式。 */
+const clipboard = []
+
 /* ------------------------------------------------------------ 渲染环境 */
 
 function setup() {
@@ -71,6 +74,14 @@ function setup() {
   window.EventSource = EventSourceStub
   global.WebSocket = ForbiddenSocket
   window.WebSocket = ForbiddenSocket
+  Object.defineProperty(window.navigator, 'clipboard', {
+    value: { writeText: async (value) => clipboard.push(String(value)) },
+    configurable: true,
+  })
+  // 每个用例从「这台机器什么都没记过」开始
+  window.localStorage.clear()
+  // 浏览器里 globalThis 就是 window；jsdom 下要手动把 localStorage 挂上去
+  Object.defineProperty(global, 'localStorage', { value: window.localStorage, configurable: true })
 
   const state = {
     ok: true,
@@ -189,115 +200,231 @@ await mount(win, React, createRoot)
 await click(byText('.ws-nav-item', '创建同步任务'))
 assert.ok(document.querySelector('.ws-modal'), '向导没打开')
 
-const serverInput = document.querySelector('input[placeholder^="192.168"]')
+const byClass = (cls) => document.querySelector(`.ws-modal ${cls}`)
+const inputs = (predicate) => [...document.querySelectorAll('.ws-modal input')].filter(predicate)
+const serverInput = byClass('input[placeholder^="192.168"]')
+const channelInput = byClass('input.ws-channel')
 assert.ok(serverInput, '没找到中继地址输入框')
-const roomInput = [...document.querySelectorAll('.ws-modal input')].find((n) => /^k[0-9a-f]{32}$/i.test(n.value))
-assert.ok(roomInput, '房间码没有默认生成（应是 k 开头的随机码）')
-const room = roomInput.value
+assert.ok(channelInput, '没找到通道码输入框')
 
-// 地址为空时不该开配对
+/* 1. 默认形态：只露 6 位通道码，房间码/密钥/邀请串都收起来 */
+
+assert.match(channelInput.value, /^\d{6}$/, '通道码应当默认生成 6 位数字')
+assert.equal(channelInput.disabled, false, '还没配对时通道码应当可输入')
+assert.equal(
+  inputs((n) => /^k[0-9a-f]{32}$/i.test(n.value)).length,
+  0,
+  '房间码不该默认出现在界面上（应在高级配置里且打码）',
+)
+// 高级配置只有一个「展开」入口，内容（房间码/密钥/邀请串）默认不渲染
+assert.ok(byText('.ws-link', '高级配置'), '缺少「高级配置」入口')
+assert.equal(
+  document.querySelectorAll('.ws-modal input[type="password"]').length,
+  0,
+  '高级配置收起时不该渲染打码字段',
+)
+console.log('PASS 默认只露 6 位通道码，房间码/密钥/邀请串收在高级配置')
+
+/* 2. 空地址不发起配对，且拦住下一步 */
+
 assert.equal(started.length, 0, '地址为空时不该发起配对')
-assert.match(text(), /还没开始配对/, '空地址时的状态文案不对')
+assert.match(text(), /先填 6 位通道码|还没开始配对/, '空地址时的状态文案不对')
 assert.equal(nextButton().disabled, true, '还没配对时「下一步」就该是禁用的')
 assert.match(nextButton().textContent, /待配对/, '禁用时按钮文案要写明原因')
 console.log('PASS 空地址不发起配对，「下一步」默认禁用')
 
-// 填地址 → 防抖后自动开配对
+/* 3. 填地址 → 防抖后自动进配对通道，带的是通道码而不是房间码 */
+
+const channel = channelInput.value
+// 从高级配置里把房间码取出来，后面要核对 announce
+await click(byText('.ws-link', '高级配置'))
+const roomInput = inputs((n) => /^k[0-9a-f]{32}$/i.test(n.value))[0]
+assert.ok(roomInput, '展开高级配置后仍看不到房间码')
+assert.equal(roomInput.type, 'password', '房间码默认必须是密文')
+const room = roomInput.value
+await click(byText('.ws-link', '高级配置')) // 收起，回到默认形态
+
 await typeInto(serverInput, '127.0.0.1:18443')
 await settle()
 assert.equal(started.length, 1, `应当只发起一次配对，实际 ${started.length}`)
 assert.equal(started[0].server, 'ws://127.0.0.1:18443/ws', `配对地址没补全：${started[0].server}`)
-assert.equal(started[0].workspace, room, '配对没带房间码')
-assert.equal(started[0].token, room, '密钥留空时应当跟随房间码')
+assert.equal(started[0].workspace, channel, '配对通道应当是 6 位通道码')
+assert.equal(started[0].token, channel, '配对通道的密钥应当跟随通道码')
+assert.match(
+  String(started[0].announce),
+  /^(k[0-9a-f]{32})\|\1$/i,
+  `创建端没把房间码+密钥挂到见面礼上：${started[0].announce}`,
+)
+assert.equal(started[0].announce.split('|')[0], room, '见面礼里的房间码与界面上的不一致')
 assert.equal(sockets.length, 0, '不应该在浏览器里连中继')
-console.log('PASS 填地址自动开配对（带 workspace + token），浏览器不开 WS')
+console.log('PASS 填地址自动进配对通道（6 位码），并把自己的房间配置挂上去')
 
-// 只有我一端 → 明确「正在等对方」，且拦住下一步
+/* 4. 只有我一端 → 明确等待，且拦住下一步 */
+
 assert.match(text(), /正在等对方/, '等待对端时没给出明确文案')
 assert.equal(nextButton().disabled, true, '还没配上时不能往下走')
 assert.match(nextButton().title, /配对/, '禁用原因没写在 title 上')
 assert.ok(byText('.ws-link', '先建我这边'), '缺少「对方已建任务」的显式出口')
 console.log('PASS 等待对端时拦住下一步，并给出显式出口')
 
-// 对端进来 → 配对通过，放行
+/* 5. 对端进来 → 配对通过，通道码置灰锁死，下一步放行 */
+
 await applyPresence({ state: 'paired', peer: 'peer-other-side' })
 assert.match(text(), /配对已通过/, '配对成功后没显示「配对已通过」')
 assert.match(text(), /peer-oth/, '没显示对端设备号')
 assert.equal(nextButton().disabled, false, '配对成功后「下一步」必须可点')
-console.log('PASS 对端进入同一房间 → 配对通过并放行')
+assert.equal(channelInput.disabled, true, '配对通过后通道码必须置灰，不让再改')
+assert.match(text(), /通道码锁定/, '通道码锁住后没说明为什么不能改')
+assert.equal(win.localStorage.getItem('winsync.relay'), '127.0.0.1:18443', '配对成功后应当记住中继地址')
+console.log('PASS 配对通过 → 通道码置灰锁定，「下一步」放行，并记住中继地址')
 
-// 对端离开 → 回到等待，重新禁用
+/* 6. 对端离开 → 回到等待，重新禁用（通道码仍然锁着，不能靠它绕过） */
+
 await applyPresence({ state: 'waiting', peer: '' })
+await React.act(async () => {
+  await wait(60)
+})
 assert.match(text(), /正在等对方/, '对端离开后没退回等待状态')
 assert.equal(nextButton().disabled, true, '对端离开后应当重新禁用「下一步」')
 console.log('PASS 对端离开 → 退回等待并重新禁用')
 
-// 401 → 明确说原因并拦住
+/* 7. 中继拒绝 → 说清是配对通道的事 */
+
 await applyPresence({
   state: 'denied',
-  error: '中继拒绝了这组密钥：房间码或密钥与中继配置不一致',
+  error: '中继拒绝了配对通道：中继若开了房间级密钥，配对房间要单独放行',
 })
-assert.match(text(), /中继拒绝了密钥/, '被 401 时没有明确说「密钥不对」')
+assert.match(text(), /中继拒绝了配对通道/, '被 401 时没有明确指出是配对通道')
 assert.equal(nextButton().disabled, true, '配置被中继拒绝时应当拦住「下一步」')
-assert.match(nextButton().title, /密钥/, '禁用原因没写在 title 上')
-console.log('PASS 401 明确提示「密钥不对」，并拦住下一步')
+assert.match(nextButton().title, /SYNC_ROOMS|密钥/, '禁用原因没写在 title 上')
+console.log('PASS 401 明确指出配对通道被拒，并拦住下一步')
 
-// 连不上 → 同样拦住，并提示检查端口
+/* 8. 连不上 → 同样拦住，并提示检查端口 */
+
 await applyPresence({ state: 'unreachable', error: '连不上 ws://127.0.0.1:18443/ws' })
 assert.match(text(), /连不上中继/, '连不上时没有明确提示')
 assert.equal(nextButton().disabled, true, '连不上中继时应当拦住「下一步」')
 console.log('PASS 连不上中继时拦住下一步')
 
-// 显式出口：对方已经建好任务，允许先建我这边
+/* 9. 显式出口：对方已经建好任务，允许先建我这边 */
+
 await applyPresence({ state: 'waiting', peer: '' })
 await click(byText('.ws-link', '先建我这边'))
 assert.equal(nextButton().disabled, false, '点了「先建我这边」之后应当放行')
 assert.match(text(), /已跳过配对等待/, '跳过配对后没有说明')
 console.log('PASS 显式出口「先建我这边」可以放行')
 
-// 重新配对会取消跳过，恢复门禁
+/* 10. 重新配对会取消跳过，恢复门禁 */
+
 await applyPresence({ state: 'waiting', peer: '' })
 assert.equal(nextButton().disabled, true, '重新配对后应当恢复门禁')
 
-// 配对通过 → 进第二步，并停掉守护（别继续占位置）
+/* 11. 配对通过 → 进第二步，并停掉守护（别继续占位置） */
+
 await applyPresence({ state: 'paired', peer: 'peer-other-side' })
 await click(nextButton())
 assert.match(text(), /本机同步目录/, '没进到第二步')
 assert.ok(stopCount > 0, '离开第一步没停掉配对守护，会一直占着房间')
 console.log('PASS 配对通过后进第二步，并停掉配对守护')
 
-// 回到第一步，改「加入已有同步」：粘邀请串要带出 server / 房间 / 密钥
+/* 12. 加入端：通道码 + 对端送来的房间配置 */
+
+// 加入端此时还没有任何配置，配对通道应当仍在等对端
+presence = { state: 'waiting', peer: '', error: '', room: '' }
 await click(byText('.ws-btn', '上一步'))
 await click(byText('.ws-tab', '加入已有同步'))
-const joinInput = [...document.querySelectorAll('.ws-modal input')].find((n) => (n.placeholder ?? '').includes('workspace='))
+await React.act(async () => {
+  await wait(60)
+})
+const joinChannel = byClass('input.ws-channel')
+assert.equal(joinChannel.value, '', '切到「加入已有同步」时不该预填别人的通道码')
+assert.match(text(), /先填 6 位通道码/, '通道码为空时状态文案不对')
+
+await typeInto(joinChannel, '482917')
+await settle()
+const joinStarted = started[started.length - 1]
+assert.equal(joinStarted.workspace, '482917', '加入端应当用填的 6 位通道码进配对通道')
+assert.equal(joinStarted.announce, '', '加入端不该广播自己的配置')
+assert.equal(joinChannel.disabled, false, '还没配对时通道码不该锁')
+console.log('PASS 加入端用 6 位通道码进配对通道，且不广播配置')
+
+/* 13. 复制出来的邀请串只带地址与通道码 */
+
+await click(byText('.ws-btn', '复制邀请'))
+assert.ok(
+  (clipboard[clipboard.length - 1] ?? '') === 'ws://127.0.0.1:18443/ws?pair=482917',
+  `通道邀请串不对：${clipboard[clipboard.length - 1]}`,
+)
+console.log('PASS 通道邀请串 = 地址 + pair=6 位码')
+
+/* 14. 对端（创建端）的配置从见面礼里接过来 */
+
+const carriedRoom = `k${'deadbeef'.repeat(4)}`
+const hex = Buffer.from(`${carriedRoom}|s3cret`, 'utf8').toString('hex')
+presence = { state: 'paired', peer: `ui-7f2a4c91e0~${hex}`, error: '', room: '482917' }
+await React.act(async () => {
+  await wait(60)
+  // 轮询 1.5s 一次，这里等一轮
+  await wait(1600)
+})
+assert.match(text(), /配对已通过/, '对端在线时应当显示配对通过')
+assert.match(text(), /自动带过来/, '没说明配置是从对端带过来的')
+await click(byText('.ws-link', '高级配置'))
+const adoptedRoom = inputs((n) => n.value === carriedRoom)[0]
+assert.ok(adoptedRoom, '没从见面礼里解出房间码')
+assert.equal(adoptedRoom.type, 'password', '接过来的房间码也必须是密文')
+const adoptedToken = inputs((n) => n.value === 's3cret')[0]
+assert.ok(adoptedToken, '没从见面礼里解出密钥')
+assert.equal(byClass('input.ws-channel').disabled, true, '配对通过后通道码必须锁住')
+console.log('PASS 加入端从配对通道收到房间码与密钥，且保持密文')
+
+/* 15. 粘邀请串：通道那份带出地址与码，完整那份带出房间码 */
+
+const joinInput = inputs((n) => (n.placeholder ?? '').includes('pair='))[0]
 assert.ok(joinInput, '没找到邀请串输入框')
-await typeInto(joinInput, 'ws://10.0.0.5:19000/ws?workspace=kdeadbeefcafe&token=s3cret')
+await typeInto(joinInput, 'ws://10.0.0.5:19000/ws?pair=123456')
 await settle()
-const joinServer = [...document.querySelectorAll('.ws-modal input')].find((n) => n.value === '10.0.0.5:19000')
-assert.ok(joinServer, '粘邀请串没有带出中继地址')
-const joinRoom = [...document.querySelectorAll('.ws-modal input')].find((n) => n.value === 'kdeadbeefcafe')
-assert.ok(joinRoom, '粘邀请串没有带出房间码')
-const last = started[started.length - 1]
-assert.equal(last.workspace, 'kdeadbeefcafe', '配对用的房间码不对')
-assert.equal(last.token, 's3cret', '自定义密钥没从邀请串里解出来')
-assert.equal(last.server, 'ws://10.0.0.5:19000/ws', '配对用的地址不对')
-console.log('PASS 粘邀请串带出 server / 房间 / 密钥，配对用的就是这三样')
+assert.ok(inputs((n) => n.value === '10.0.0.5:19000')[0], '粘邀请串没有带出中继地址')
+assert.equal(byClass('input.ws-channel').value, '123456', '粘邀请串没有带出通道码')
+assert.equal(started[started.length - 1].workspace, '123456', '配对通道没跟着变')
+console.log('PASS 粘通道邀请串带出地址与通道码')
 
-// 旧版 6 位配对码仍然认，但要展开成 pair-xxxxxx
-await typeInto(joinInput, '123456')
+/* 16. 单独填 6 位数字仍然当成通道码 */
+
+await typeInto(joinInput, '654321')
 await settle()
-const legacy = [...document.querySelectorAll('.ws-modal input')].find((n) => n.value === 'pair-123456')
-assert.ok(legacy, '6 位旧配对码没有展开成 pair-123456')
-assert.equal(started[started.length - 1].workspace, 'pair-123456', '旧配对码的配对房间不对')
-console.log('PASS 旧 6 位配对码兼容为 pair-xxxxxx 房间')
+assert.equal(byClass('input.ws-channel').value, '654321', '单独填 6 位数字应当当成通道码')
+assert.equal(started[started.length - 1].workspace, '654321', '配对通道应当就是这 6 位')
+console.log('PASS 单独填 6 位数字即通道码')
 
-// 关掉向导：守护必须停掉
+/* 17. 关掉向导：守护必须停掉 */
+
 const stopsBefore = stopCount
 await click(byText('.ws-btn', '取消'))
 assert.equal(document.querySelector('.ws-modal'), null, '向导没有关闭')
-await React.act(async () => { await wait(50) })
+await React.act(async () => {
+  await wait(50)
+})
 assert.ok(stopCount > stopsBefore, '关向导时没停掉配对守护')
 assert.equal(sockets.length, 0, '整个流程都不该有浏览器直连中继')
 console.log('PASS 关闭向导会停掉守护，全程 0 条浏览器 WebSocket')
+
+/* 18. 中继地址记住，下次新建不用再填 */
+
+const savedRelay = win.localStorage.getItem('winsync.relay')
+assert.ok(savedRelay, '中继地址没被记住')
+await click(byText('.ws-nav-item', '创建同步任务'))
+const prefilled = document.querySelector('.ws-modal input[placeholder^="192.168"]')
+assert.ok(prefilled, '没找到中继地址输入框')
+assert.equal(prefilled.value, savedRelay, `再次新建时没带出上次的中继地址（实际「${prefilled.value}」）`)
+assert.match(text(), /上次用的中继地址/, '带出的地址没有说明来历')
+await click(byText('.ws-btn', '取消'))
+console.log('PASS 中继地址记在本机，下次新建直接带出')
+
+/* 19. 记的只是地址：房间码、密钥、通道码都不落盘 */
+
+const dumped = JSON.stringify({ ...win.localStorage })
+assert.ok(!/token|secret|k[0-9a-f]{32}|pair=/.test(dumped), `localStorage 里不该有凭据：${dumped}`)
+console.log('PASS localStorage 里只有中继地址，没有房间码/密钥/通道码')
 
 console.log('pairing: 全部通过')

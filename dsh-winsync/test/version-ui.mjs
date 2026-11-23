@@ -13,6 +13,7 @@
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 import { JSDOM } from 'jsdom'
 import React from 'react'
@@ -20,7 +21,8 @@ import { createRoot } from 'react-dom/client'
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
-const BUNDLE = process.env.WINSYNC_CLIENT ?? new URL('../lib/client.js', import.meta.url).pathname
+// Windows 上 URL.pathname 会给出 /C:/…，readFileSync 会拼成 C:\C:\…
+const BUNDLE = process.env.WINSYNC_CLIENT ?? fileURLToPath(new URL('../lib/client.js', import.meta.url))
 
 const DOM = '<!doctype html><html><body><div id="app"></div></body></html>'
 
@@ -53,11 +55,7 @@ const SELF = {
   ok: true,
   plugin: 'dsh-winsync',
   version: '0.5.3',
-  label: '0.5.3 · c76a83c+dirty',
-  commit: 'c76a83c',
-  commitSource: 'git',
-  branch: 'master',
-  dirty: true,
+  label: '0.5.3',
   builtAt: '2026-11-23T00:00:00.000Z',
   dir: 'C:\\repo\\dsh-winsync',
 }
@@ -145,11 +143,12 @@ const text = () => document.body.textContent ?? ''
 
   const badge = document.querySelector('.ws-ver')
   assert.ok(badge, '没有渲染出版本角标')
-  assert.equal(badge.textContent, 'v0.5.3 · c76a83c+dirty', `角标文案不对：${badge.textContent}`)
-  assert.equal(badge.dataset.dirty, 'true', 'dirty 状态没有反映到样式钩子上')
-  assert.match(badge.getAttribute('title'), /c76a83c/, 'title 里没有 commit')
-  assert.match(badge.getAttribute('title'), /有未提交改动/, 'title 里没提未提交改动')
-  console.log('PASS 角标显示版本 + commit + dirty')
+  assert.equal(badge.textContent, 'v0.5.3', `角标文案不对：${badge.textContent}`)
+  assert.equal(badge.dataset.dirty, undefined, '角标不该再带 dirty 标记')
+  assert.ok(!/c76a83c/.test(badge.getAttribute('title')), 'title 里不该再出现 commit')
+  assert.match(badge.getAttribute('title'), /dsh-winsync 0\.5\.3/, 'title 里没写版本')
+  assert.match(badge.getAttribute('title'), /目录/, 'title 里没写安装目录')
+  console.log('PASS 角标只显示版本号，不含 git 记录')
 
   // 点击复制：粘到 issue 里的那份文本要含版本、提交、目录
   await React.act(async () => {

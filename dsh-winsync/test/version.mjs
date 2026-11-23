@@ -7,7 +7,7 @@
  * 断言：
  *   1. 不触发 daemon 也能 200，且字段齐全
  *   2. version 与 package.json 一致（打包后就是包里的那份）
- *   3. commit 要么是短哈希，要么明确为 null+来源 null（不能是空串这种半成品）
+ *   3. 不再自述 commit / dirty：版本号那一行不显示 git 记录
  *   4. /ping 与 /diag 也带版本，命令行 hand-curl 能直接看到
  *
  * 用法：node test/version.mjs
@@ -35,16 +35,10 @@ const { pluginInfo, pluginLabel } = await import('../lib/version.js')
 
 assert.equal(pluginInfo.version, pkg.version, '自述版本与 package.json 不一致')
 assert.ok(pluginInfo.dir.endsWith('dsh-winsync') || pluginInfo.dir.endsWith('package'), '自述目录可疑')
-assert.equal(typeof pluginInfo.dirty, 'boolean', 'dirty 必须是布尔值，不能是 undefined')
-
-if (pluginInfo.commit === null) {
-  assert.equal(pluginInfo.commitSource, null, '没有 commit 时来源也必须是 null')
-} else {
-  assert.match(pluginInfo.commit, /^[0-9a-f]{7,40}$/i, `commit 不像个哈希：${pluginInfo.commit}`)
-  assert.ok(pluginInfo.commitSource, '有 commit 就要说明来源')
-}
-assert.match(pluginLabel, new RegExp(`^${pkg.version.replace(/\./g, '\\.')}`), 'label 没以版本号开头')
-console.log(`PASS 模块层自述：${pluginLabel}（来源 ${pluginInfo.commitSource ?? '无'}）`)
+assert.equal(pluginInfo.commit, undefined, '不再自述 commit（版本号里不显示 git 记录）')
+assert.equal(pluginInfo.dirty, undefined, '不再自述 dirty')
+assert.equal(pluginLabel, pkg.version, 'label 应当只有版本号')
+console.log(`PASS 模块层自述：${pluginLabel}（不含 git 信息）`)
 
 /* ------------------------------------------------------------ HTTP 层 */
 
@@ -90,8 +84,8 @@ try {
   assert.equal(body.plugin, 'dsh-winsync')
   assert.equal(body.version, pkg.version)
   assert.equal(body.label, pluginLabel)
-  assert.ok('commit' in body, '/version 缺 commit 字段')
-  assert.ok('dirty' in body, '/version 缺 dirty 字段')
+  assert.ok(!('commit' in body), '/version 不该再暴露 commit')
+  assert.ok(!('dirty' in body), '/version 不该再暴露 dirty')
   assert.ok('builtAt' in body, '/version 缺 builtAt 字段')
   assert.ok(body.dir, '/version 缺 dir 字段')
   assert.equal(touched, 0, `version 接口碰了 daemon ${touched} 次`)
@@ -100,8 +94,8 @@ try {
   const ping = await get('/ping')
   assert.equal(ping.status, 200)
   assert.equal(ping.body.version, pkg.version, '/ping 没带版本')
-  assert.equal(ping.body.commit, pluginInfo.commit, '/ping 的 commit 与自述不一致')
-  console.log('PASS /ping 带版本与 commit')
+  assert.ok(!('commit' in ping.body), '/ping 不该再暴露 commit')
+  console.log('PASS /ping 带版本，不带 git 记录')
 
   // /diag 会拉 daemon，这里只要它别在 version 之前崩，字段照样给全
   assert.equal(typeof pluginInfo.version, 'string')

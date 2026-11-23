@@ -883,6 +883,20 @@ struct ProbeInput {
     workspace: String,
     #[serde(default)]
     token: String,
+    /// 配对的「见面礼」：一段不透明文本（向导里放的是 `房间码|密钥`）。
+    ///
+    /// 6 位通道码只负责让两端见面，真正同步要用的 32 位房间码不能靠 6 位数推出来
+    /// （那样房间就只剩 100 万种可能），所以见面之后要顺带把它带过去。
+    /// 载体用的是 `Msg::Hello` 里的 `device_id`：中继会把它原样塞进
+    /// `PeerStatus.peer_device_id` 推回给同房间的另一端，于是不用动协议、
+    /// 中继也不用落任何数据。这里只做十六进制转义，中继看到的就是一串安全字符。
+    #[serde(default)]
+    announce: String,
+}
+
+/// 载荷要能塞进 device_id（单行、无空格、无引号），十六进制最省事也最不容易踩转义。
+fn hex_of(text: &str) -> String {
+    text.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 与网页端 normalizeServer 同一套规则：补协议头、补 /ws。
@@ -1052,7 +1066,7 @@ async fn presence_loop(gen: u64, url: String, room: String, server: String, devi
                     s.state = if denied { "denied" } else { "unreachable" };
                     s.peer.clear();
                     s.error = if denied {
-                        "中继拒绝了这组密钥：房间码或密钥与中继配置不一致".to_string()
+                        "中继拒绝了配对通道：中继若开了房间级密钥，配对房间要单独放行（或加 \"*\" 兜底密钥）".to_string()
                     } else {
                         format!("连不上 {server}：{err}")
                     };
@@ -1133,7 +1147,7 @@ async fn presence_start(Json(body): Json<ProbeInput>) -> ApiResult {
     let server = normalize_probe_server(&body.server);
     let room = body.workspace.trim().to_string();
     if server.is_empty() || room.is_empty() {
-        return Err(ApiError::bad("服务器地址和房间码都要填"));
+        return Err(ApiError::bad("服务器地址和通道码都要填"));
     }
     let presented = body.token.trim();
     let token = if presented.is_empty() {
@@ -1141,8 +1155,15 @@ async fn presence_start(Json(body): Json<ProbeInput>) -> ApiResult {
     } else {
         presented.to_string()
     };
-    // 每次配对换一个 device id：中继遇到同 id 会踢掉旧连接，换掉才不会误伤上一次的
-    let device = format!("ui-{}", uuid::Uuid::new_v4().simple());
+    // 每次配对换一个 device id：中继遇到同 id 会踢掉旧连接，换掉才不会误伤上一次的。
+    // 后面拼的 `~<hex>` 是给对端看的配置（见 `ProbeInput::announce`）。
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let announce = body.announce.trim();
+    let device = if announce.is_empty() {
+        format!("ui-{nonce}")
+    } else {
+        format!("ui-{nonce}~{}", hex_of(announce))
+    };
     let cfg = Config {
         server: server.clone(),
         token,

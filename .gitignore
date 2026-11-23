@@ -38,6 +38,7 @@ sync/新建 文本文档.txt
 dsh-winsync/test/.cdp-profile*/
 dsh-winsync/test/cdp-shot.png
 dsh-winsync/test/shots/
+dsh-winsync/test/.preview/
 dsh-winsync/node_modules/
 
 # 插件包内嵌的 daemon 二进制（构建产物，发布时打进 tgz，不进版本库）

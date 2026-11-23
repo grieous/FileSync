@@ -23,7 +23,9 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 /* 主题变量：默认深色；浅色主题由宿主 body[data-ds-dark-theme] 缺省时切过来。
-   换肤只改这一组变量，控件样式本身不用重复写。 */
+   换肤只改这一组变量，控件样式本身不用重复写。
+   按钮/提示这类「有底色」的控件单独占一组变量：深浅两套必须各自可读，
+   不能靠一条写死的颜色两边共用（浅色下深底浅字会被当成禁用）。 */
 .ws-root{
   --ws-bg:#0E0F10; --ws-side:#161719; --ws-card:#1C1D1F; --ws-input:#1A1B1D;
   --ws-zebra:#121315; --ws-hover:#232427; --ws-chip:#26282B;
@@ -33,6 +35,15 @@ window.__ModuleLoader__.load({
   --ws-active:#1E355C; --ws-accent:#2B6CF6; --ws-accent-hover:#3B78F8;
   --ws-ok:#4CC38A; --ws-warn:#E6A23C; --ws-danger:#F0554D;
   --ws-danger-line:#4A2320; --ws-danger-bg:#2A1715;
+  --ws-btn-bg:#242528; --ws-btn-bg-hover:#2E3034; --ws-btn-line:#3A3D42;
+  --ws-btn-line-hover:#4A4E54; --ws-btn-text:#EDEDEE;
+  --ws-btn-off-bg:#1D1E21; --ws-btn-off-line:#2A2C2E; --ws-btn-off-text:#6E7176;
+  --ws-primary-text:#FFFFFF; --ws-primary-off-bg:#26364F; --ws-primary-off-text:#8FA3BE;
+  --ws-warn-bg:#2A2318; --ws-warn-line:#4A3A18;
+  --ws-toast-bad-bg:#2A1715; --ws-toast-bad-line:#5A2A26; --ws-toast-bad-text:#FFB4AF;
+  --ws-toast-ok-bg:#16281F; --ws-toast-ok-line:#25503C; --ws-toast-ok-text:#9BE3BF;
+  --ws-overlay:rgba(6,7,8,.62); --ws-shadow:0 8px 24px rgba(0,0,0,.45);
+  --ws-step-done:#2A5CB8; --ws-thumb-hover:#3A3D41;
 }
 .ws-root[data-theme="light"]{
   --ws-bg:#F5F6F8; --ws-side:#FFFFFF; --ws-card:#FFFFFF; --ws-input:#FFFFFF;
@@ -40,9 +51,18 @@ window.__ModuleLoader__.load({
   --ws-line:#E1E4E9; --ws-line-soft:#EDEFF3; --ws-line-strong:#CFD3D9;
   --ws-text:#1B1D21; --ws-text-soft:#3D4147; --ws-dim:#5A5F66;
   --ws-muted:#767C83; --ws-faint:#9AA0A7; --ws-chip-text:#4A4F55;
-  --ws-active:#DCE8FF; --ws-accent:#2B6CF6; --ws-accent-hover:#1F5CE0;
-  --ws-ok:#1F8A5B; --ws-warn:#A86800; --ws-danger:#C0352D;
+  --ws-active:#DCE8FF; --ws-accent:#1F5CE0; --ws-accent-hover:#1A4FC4;
+  --ws-ok:#1F8A5B; --ws-warn:#8A5800; --ws-danger:#C0352D;
   --ws-danger-line:#E7C3BF; --ws-danger-bg:#FCEFEE;
+  --ws-btn-bg:#FFFFFF; --ws-btn-bg-hover:#F1F3F6; --ws-btn-line:#CFD4DB;
+  --ws-btn-line-hover:#B7BEC7; --ws-btn-text:#1B1D21;
+  --ws-btn-off-bg:#F1F3F6; --ws-btn-off-line:#E3E6EB; --ws-btn-off-text:#A3A9B1;
+  --ws-primary-text:#FFFFFF; --ws-primary-off-bg:#C2CFEA; --ws-primary-off-text:#697A96;
+  --ws-warn-bg:#FFF6E3; --ws-warn-line:#F0DCB0;
+  --ws-toast-bad-bg:#FCEFEE; --ws-toast-bad-line:#E7C3BF; --ws-toast-bad-text:#8C2A23;
+  --ws-toast-ok-bg:#EAF7F0; --ws-toast-ok-line:#BEDFCD; --ws-toast-ok-text:#146C46;
+  --ws-overlay:rgba(18,24,33,.38); --ws-shadow:0 8px 24px rgba(20,28,40,.14);
+  --ws-step-done:#8FB0E8; --ws-thumb-hover:#C4C9D0;
 }
 
 /* 主区面板只能占 dsh 给它的那一格：不能用 absolute/inset:0——那会以 .frame
@@ -81,8 +101,6 @@ window.__ModuleLoader__.load({
   font-family:ui-monospace,Consolas,monospace;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
 .ws-ver:hover{background:var(--ws-hover);color:var(--ws-dim)}
-.ws-ver[data-dirty="true"]{color:#C9A227}
-.ws-ver[data-dirty="true"]:hover{color:#E0B73A}
 .ws-ver:focus{outline:none}
 .ws-ver:focus-visible{outline:2px solid var(--ws-accent);outline-offset:1px}
 /* 配对状态：ok=两端已在同一房间，bad=进房间失败（房间满/地址错/中继要求密钥） */
@@ -95,22 +113,33 @@ window.__ModuleLoader__.load({
 .ws-scroll::-webkit-scrollbar-thumb,.ws-raw-body::-webkit-scrollbar-thumb{
   background:var(--ws-line);border-radius:4px}
 .ws-scroll::-webkit-scrollbar-thumb:hover,.ws-raw-body::-webkit-scrollbar-thumb:hover{
-  background:#3A3D41}
+  background:var(--ws-thumb-hover)}
 .ws-scroll::-webkit-scrollbar-track,.ws-raw-body::-webkit-scrollbar-track{background:transparent}
 .ws-row{display:flex;align-items:center;gap:10px}
 .ws-page-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
 .ws-title{font-size:18px;font-weight:600;margin:0}
 .ws-sub{color:var(--ws-muted);font-size:12px}
 .ws-device{color:var(--ws-dim);font-size:12px;margin:8px 0 14px}
-.ws-btn{appearance:none;border:1px solid var(--ws-line);background:var(--ws-hover);color:var(--ws-text);
-  border-radius:6px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}
-.ws-btn:hover{background:var(--ws-line)}
-.ws-btn[disabled]{opacity:.45;cursor:not-allowed}
-.ws-btn-primary{background:var(--ws-accent);border-color:var(--ws-accent);color:#fff}
-.ws-btn-primary:hover{background:var(--ws-accent-hover)}
-.ws-btn-ghost{background:transparent}
-.ws-btn-danger{color:var(--ws-danger);border-color:var(--ws-danger-line)}
-.ws-btn-danger:hover{background:var(--ws-danger-bg)}
+/* 按钮：底色/描边/文字全部取主题变量，深浅两套各自成立。
+   以前底色写死深灰、禁用只降透明度——浅色主题下普通按钮发灰像禁用，
+   禁用的直接看不见。 */
+.ws-btn{appearance:none;border:1px solid var(--ws-btn-line);background:var(--ws-btn-bg);color:var(--ws-btn-text);
+  border-radius:6px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer;
+  transition:background .12s,border-color .12s,color .12s}
+.ws-btn:hover:not([disabled]){background:var(--ws-btn-bg-hover);border-color:var(--ws-btn-line-hover)}
+.ws-btn:active:not([disabled]){background:var(--ws-btn-line)}
+.ws-btn[disabled]{background:var(--ws-btn-off-bg);border-color:var(--ws-btn-off-line);
+  color:var(--ws-btn-off-text);cursor:not-allowed}
+.ws-btn-primary{background:var(--ws-accent);border-color:var(--ws-accent);color:var(--ws-primary-text);
+  font-weight:500}
+.ws-btn-primary:hover:not([disabled]){background:var(--ws-accent-hover);border-color:var(--ws-accent-hover)}
+.ws-btn-primary[disabled]{background:var(--ws-primary-off-bg);border-color:var(--ws-primary-off-bg);
+  color:var(--ws-primary-off-text);font-weight:400}
+.ws-btn-ghost{background:transparent;border-color:transparent;color:var(--ws-dim)}
+.ws-btn-ghost:hover:not([disabled]){background:var(--ws-btn-bg-hover);border-color:var(--ws-btn-line);
+  color:var(--ws-text)}
+.ws-btn-danger{background:transparent;color:var(--ws-danger);border-color:var(--ws-danger-line)}
+.ws-btn-danger:hover:not([disabled]){background:var(--ws-danger-bg);border-color:var(--ws-danger)}
 .ws-card{background:var(--ws-card);border:1px solid var(--ws-line);border-radius:10px;padding:14px 16px;
   margin-bottom:12px}
 .ws-card[data-selected="true"]{border-color:var(--ws-accent)}
@@ -172,6 +201,15 @@ window.__ModuleLoader__.load({
 .ws-field .ws-input,.ws-field .ws-select{width:100%;box-sizing:border-box;padding:6px 9px;height:32px}
 .ws-field .ws-num{max-width:180px}
 .ws-field .ws-hint{color:var(--ws-muted);font-size:11px;margin-top:4px}
+/* 通道码是这一屏唯一要人肉输入的东西：等宽、放大、拉开字距，好念也好核对。
+   配对完成后置灰锁住——那时它已经没用了，还能改反而容易把对端甩掉。 */
+.ws-field .ws-input.ws-channel{font-family:ui-monospace,Consolas,monospace;font-size:18px;
+  letter-spacing:.3em;text-indent:.3em;height:44px;padding:0 12px;text-align:center}
+.ws-field .ws-input.ws-channel[disabled]{background:var(--ws-btn-off-bg);border-color:var(--ws-btn-off-line);
+  color:var(--ws-btn-off-text);cursor:not-allowed}
+.ws-channel-row .ws-btn{height:44px}
+.ws-adv-head{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  margin-top:12px;padding-top:10px;border-top:1px solid var(--ws-line-soft)}
 .ws-overlay{position:absolute;inset:0;background:rgba(0,0,0,.55);display:flex;
   align-items:center;justify-content:center;z-index:40}
 .ws-modal{background:var(--ws-side);border:1px solid var(--ws-line);border-radius:12px;width:min(620px,92%);
@@ -182,22 +220,24 @@ window.__ModuleLoader__.load({
 .ws-modal-body{padding:14px 18px;overflow:auto;min-height:0;flex:1 1 auto}
 .ws-modal-body::-webkit-scrollbar{width:8px}
 .ws-modal-body::-webkit-scrollbar-thumb{background:var(--ws-line);border-radius:4px}
-.ws-modal-body::-webkit-scrollbar-thumb:hover{background:#3A3D41}
+.ws-modal-body::-webkit-scrollbar-thumb:hover{background:var(--ws-thumb-hover)}
 .ws-modal-body::-webkit-scrollbar-track{background:transparent}
 .ws-modal-foot{padding:12px 18px;border-top:1px solid var(--ws-line);display:flex;
   justify-content:flex-end;gap:8px;flex:0 0 auto}
 .ws-steps{display:flex;gap:8px;margin-bottom:16px}
 .ws-step{flex:1;border-top:2px solid var(--ws-line);padding-top:6px;color:var(--ws-faint);font-size:11px;
   transition:border-color .15s,color .15s}
-.ws-step[data-state="done"]{border-color:#1E4FA8;color:var(--ws-muted)}
+.ws-step[data-state="done"]{border-color:var(--ws-step-done);color:var(--ws-muted)}
 .ws-step[data-state="on"]{border-color:var(--ws-accent);color:var(--ws-text);font-weight:600}
 .ws-toast{position:absolute;left:50%;transform:translateX(-50%);bottom:18px;z-index:60;
   background:var(--ws-hover);border:1px solid var(--ws-line);border-radius:8px;padding:8px 14px;
   font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45);max-width:70%}
-.ws-toast[data-tone="bad"]{border-color:#5A2A26;color:#FFB4AF}
-.ws-toast[data-tone="ok"]{border-color:#25503C;color:#9BE3BF}
+.ws-toast[data-tone="bad"]{background:var(--ws-toast-bad-bg);border-color:var(--ws-toast-bad-line);color:var(--ws-toast-bad-text)}
+.ws-toast[data-tone="ok"]{background:var(--ws-toast-ok-bg);border-color:var(--ws-toast-ok-line);color:var(--ws-toast-ok-text)}
 .ws-banner{padding:8px 12px;border-radius:8px;font-size:12px;
-  background:#2A2318;border:1px solid #4A3A18;color:var(--ws-warn);display:flex;gap:10px;align-items:center}
+  background:var(--ws-warn-bg);border:1px solid var(--ws-warn-line);color:var(--ws-warn);display:flex;gap:10px;align-items:center}
+.ws-banner[data-tone="bad"]{background:var(--ws-toast-bad-bg);border-color:var(--ws-toast-bad-line);
+  color:var(--ws-toast-bad-text)}
 .ws-raw{position:absolute;right:16px;bottom:16px;width:min(680px,72%);max-height:56%;
   background:var(--ws-side);border:1px solid var(--ws-line);border-radius:10px;display:flex;
   flex-direction:column;z-index:50;box-shadow:0 18px 40px rgba(0,0,0,.55)}
@@ -300,6 +340,33 @@ window.__ModuleLoader__.load({
     const DEFAULT_SYNC_PORT = 8443
 
     /**
+     * 中继地址记在本机，下次新建任务直接带出来——同一台机器连着的中继基本不变，
+     * 每次重填一遍 IP:端口纯属浪费。只记地址：房间码、密钥、通道码都不落盘。
+     *
+     * 存 localStorage 而不是 daemon 配置里：这是「这台机器的界面习惯」，
+     * 换台机器本来就该重新填；而且这些值要能在 daemon 没起来时也读得到。
+     */
+    const RELAY_KEY = 'winsync.relay'
+
+    function loadRelay() {
+      try {
+        return String(globalThis.localStorage?.getItem(RELAY_KEY) ?? '').trim()
+      } catch {
+        return ''
+      }
+    }
+
+    function saveRelay(value) {
+      const text = String(value ?? '').trim()
+      if (!text) return
+      try {
+        globalThis.localStorage?.setItem(RELAY_KEY, text)
+      } catch {
+        /* 隐私模式下写不进去：不影响本次使用 */
+      }
+    }
+
+    /**
      * 界面只让用户填 IP 或 IP:端口，协议头 / 路径 / 默认端口都在这里补。
      * 已经写了 ws:// 或 wss:// 的完整地址原样保留——老配置和反代部署不受影响。
      */
@@ -331,6 +398,59 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 通道码：6 位数字，人肉念一遍就能对上，不用打字 32 位。
+     *
+     * 它只负责「让两端见面」，不是房间本身——中继按房间名配对，
+     * 这里进的是 `<通道码>::pair` 这间旁路房，真正的 32 位房间码见面之后再传过去。
+     * 拿 6 位码反推房间是不行的：那样房间就只剩 100 万种可能，跟没有房间门禁一样。
+     */
+    function newChannel() {
+      const buf = new Uint32Array(1)
+      if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(buf)
+      else buf[0] = Math.floor(Math.random() * 0xffffffff)
+      return String(buf[0] % 1000000).padStart(6, '0')
+    }
+
+    /** 只留数字，多余字符直接丢掉：粘贴带空格、带短横的码也能用。 */
+    function digitsOnly(text) {
+      return String(text ?? '').replace(/\D+/g, '')
+    }
+
+    /** 十六进制还原成文本（daemon 把配对载荷按字节转成 hex 塞在 device_id 里）。 */
+    function fromHex(hex) {
+      const raw = String(hex ?? '')
+      if (!/^(?:[0-9a-f]{2})+$/i.test(raw)) return ''
+      const bytes = new Uint8Array(raw.length / 2)
+      for (let i = 0; i < bytes.length; i += 1) bytes[i] = parseInt(raw.slice(i * 2, i * 2 + 2), 16)
+      try {
+        return new TextDecoder().decode(bytes)
+      } catch {
+        return ''
+      }
+    }
+
+    /**
+     * 从 presence 的 peer 字段里读出对端的配置。
+     * daemon 的写法是 `ui-<随机>~<hex>`；`~` 后面那截就是 `房间码|密钥`。
+     */
+    function peerInvite(peer) {
+      const match = /~([0-9a-f]+)$/i.exec(String(peer ?? ''))
+      if (!match) return null
+      const text = fromHex(match[1])
+      if (!text) return null
+      const [room, token] = text.split('|')
+      const code = String(room ?? '').trim()
+      if (!code) return null
+      return { room: code, token: String(token ?? '').trim() || code }
+    }
+
+    /** 房间码太长，界面上默认只露前 8 位：够核对是不是同一间，不足以被抄走。 */
+    function shortRoom(room) {
+      const text = String(room ?? '')
+      return text.length > 10 ? `${text.slice(0, 8)}…` : text
+    }
+
+    /**
      * 邀请串 = 中继地址 + 房间名 + 密钥，和 daemon 真正连的那条地址同构：
      * `ws://host:port/ws?workspace=<房间>&token=<密钥>`。
      *
@@ -348,8 +468,20 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 反过来：把粘进来的文本拆成服务器 / 房间码 / 密钥。
-     * 认三种写法：完整邀请串、旧的 `...#房间码`、单独的房间码或 6 位旧配对码。
+     * 通道码那份邀请：只带地址与 6 位码，粘到「加入已有同步」里能直接填好两栏。
+     * 房间码与密钥不在这里——它们靠配对通道传，见 `peerInvite`。
+     */
+    function channelInviteOf(server, channel) {
+      const url = normalizeServer(server)
+      const code = digitsOnly(channel)
+      if (!code) return url
+      return `${url}?pair=${code}`
+    }
+
+    /**
+     * 反过来：把粘进来的文本拆成服务器 / 房间码 / 密钥 / 通道码。
+     * 认四种写法：完整邀请串（带 workspace）、通道码邀请串（带 pair）、
+     * 旧的 `...#房间码`、单独的房间码或 6 位数字。
      */
     function parseInvite(text) {
       const raw = String(text ?? '').trim()
@@ -357,15 +489,20 @@ window.__ModuleLoader__.load({
       const full = /^(wss?:\/\/[^\s#?]+)(?:\?([^\s#]*))?(?:#([^\s]*))?$/i.exec(raw)
       if (full) {
         const query = new URLSearchParams(full[2] ?? '')
+        const channel = digitsOnly(query.get('pair') ?? '')
+        if (channel) {
+          const server = full[1]
+          return { server, channel, room: '', token: '' }
+        }
         const hashRoom = String(full[3] ?? '').trim()
         const room = String(query.get('workspace') ?? query.get('room') ?? hashRoom ?? '').trim()
         if (!room) return null
         const token = String(query.get('token') ?? '').trim() || room
-        return { server: full[1], room, token }
+        return { server: full[1], room, token, channel: '' }
       }
+      if (/^\d{6}$/.test(raw)) return { server: '', channel: raw, room: '', token: '' }
       if (/^\S{4,}$/.test(raw) && !/[\\/]/.test(raw)) {
-        const room = /^\d{6}$/.test(raw) ? `pair-${raw}` : raw
-        return { server: '', room, token: room }
+        return { server: '', room: raw, token: raw, channel: '' }
       }
       return null
     }
@@ -411,19 +548,19 @@ window.__ModuleLoader__.load({
       // running 与 last_error 会同时存在（上一轮失败、这一轮还在等对端），
       // 这时说「同步中」会让人以为错误已经好了，所以单独标成「重试中」。
       if (rt.running) {
-        if (waitingPeer(rt.last_error)) return { text: '等待对端上线…', tone: '#E6A23C' }
+        if (waitingPeer(rt.last_error)) return { text: '等待对端上线…', tone: 'var(--ws-warn)' }
         return rt.last_error
-          ? { text: '重试中…', tone: '#E6A23C' }
-          : { text: '同步中…', tone: '#E6A23C' }
+          ? { text: '重试中…', tone: 'var(--ws-warn)' }
+          : { text: '同步中…', tone: 'var(--ws-warn)' }
       }
-      if (task.paused) return { text: '已暂停', tone: '#6E7176' }
+      if (task.paused) return { text: '已暂停', tone: 'var(--ws-faint)' }
       if (rt.last_error) {
         return waitingPeer(rt.last_error)
-          ? { text: '等待对端上线', tone: '#E6A23C' }
-          : { text: '同步失败', tone: '#F0554D' }
+          ? { text: '等待对端上线', tone: 'var(--ws-warn)' }
+          : { text: '同步失败', tone: 'var(--ws-danger)' }
       }
-      if (rt.last) return { text: rt.last.up_to_date ? '两端已一致' : '同步完成', tone: '#4CC38A' }
-      return { text: '等待同步', tone: '#6E7176' }
+      if (rt.last) return { text: rt.last.up_to_date ? '两端已一致' : '同步完成', tone: 'var(--ws-ok)' }
+      return { text: '等待同步', tone: 'var(--ws-faint)' }
     }
 
     /** 变更统计：全是 0 时不必把四个 0 都念一遍。 */
@@ -710,7 +847,12 @@ window.__ModuleLoader__.load({
             'div',
             null,
             h('dt', null, '目标房间'),
-            h('dd', null, `${task.server_short || shortServer(task.server)} / ${task.workspace}`),
+            // 房间码就是门禁，卡片上只露前 8 位；完整串留在悬停提示里
+            h(
+              'dd',
+              { title: `${task.server_short || shortServer(task.server)} / ${task.workspace}` },
+              `${task.server_short || shortServer(task.server)} / ${shortRoom(task.workspace)}`,
+            ),
           ),
           h(
             'div',
@@ -1003,7 +1145,7 @@ window.__ModuleLoader__.load({
                     h('td', null, row.action),
                     h(
                       'td',
-                      { style: { color: row.ok ? '#4CC38A' : '#F0554D' } },
+                      { style: { color: row.ok ? 'var(--ws-ok)' : 'var(--ws-danger)' } },
                       row.ok ? '成功' : '失败',
                     ),
                     h('td', { title: row.message }, row.message),
@@ -1175,7 +1317,7 @@ window.__ModuleLoader__.load({
                     marginTop: 10,
                     whiteSpace: 'pre-wrap',
                     wordBreak: 'break-all',
-                    color: '#A0A2A6',
+                    color: 'var(--ws-dim)',
                   },
                 },
                 JSON.stringify(diag, null, 2),
@@ -1211,7 +1353,8 @@ window.__ModuleLoader__.load({
         maxMb: task.filter?.size_max ? task.filter.size_max / MB : 0,
       })
       const [busy, setBusy] = React.useState(false)
-      const [showToken, setShowToken] = React.useState(false)
+      // 房间码、密钥、邀请串共用一个「显示」开关：默认都是密文
+      const [reveal, setReveal] = React.useState(false)
 
       // 密钥不进 /state（那里只有 has_token），打开设置时按需取一次：
       // 「复制邀请」必须带上它，否则对方拿到的是缺密钥的半截配置。
@@ -1243,7 +1386,7 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const revealToken = () => setShowToken((v) => !v)
+      const toggleReveal = () => setReveal((v) => !v)
 
       const body = (force) => ({
         name: form.name,
@@ -1283,6 +1426,8 @@ window.__ModuleLoader__.load({
               }),
             '已保存',
           )
+          // 改任务时填的地址同样记下来：下次新建任务不用再敲
+          saveRelay(form.server)
           onClose()
         } catch {
           /* toast 已经提示过 */
@@ -1330,11 +1475,18 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'ws-field-row' },
+                // 房间码/密钥默认打码：32 位随机串摆在设置页上，谁路过都看得到
                 h('input', {
                   className: 'ws-input',
+                  type: reveal ? 'text' : 'password',
                   value: form.workspace,
                   onChange: (e) => setForm({ ...form, workspace: e.target.value }),
                 }),
+                h(
+                  'button',
+                  { type: 'button', className: 'ws-btn', onClick: toggleReveal },
+                  reveal ? '隐藏' : '显示',
+                ),
                 h(
                   'button',
                   { type: 'button', className: 'ws-btn', onClick: () => void copyInvite() },
@@ -1354,9 +1506,7 @@ window.__ModuleLoader__.load({
                   '换成随机码',
                 ),
               ),
-              h('div', { className: 'ws-hint' }, '双方必须相同；点「复制邀请」把整串发对方'),
-              h('div', { className: 'ws-hint ws-mono', style: { wordBreak: 'break-all' } },
-                inviteOf(form.server, form.workspace, secret)),
+              h('div', { className: 'ws-hint' }, '双方必须相同；点「复制邀请」把整串发对方，不用手抄'),
             ),
             h(
               'div',
@@ -1367,15 +1517,15 @@ window.__ModuleLoader__.load({
                 { className: 'ws-field-row' },
                 h('input', {
                   className: 'ws-input',
-                  type: showToken ? 'text' : 'password',
+                  type: reveal ? 'text' : 'password',
                   value: form.token,
                   placeholder: '留空则与房间码相同',
                   onChange: (e) => setForm({ ...form, token: e.target.value }),
                 }),
                 h(
                   'button',
-                  { type: 'button', className: 'ws-btn', onClick: revealToken },
-                  showToken ? '隐藏' : '显示',
+                  { type: 'button', className: 'ws-btn', onClick: toggleReveal },
+                  reveal ? '隐藏' : '显示',
                 ),
               ),
               h(
@@ -1420,7 +1570,7 @@ window.__ModuleLoader__.load({
             ),
             h(
               'div',
-              { style: { color: '#6E7176', fontSize: 11 } },
+              { style: { color: 'var(--ws-faint)', fontSize: 11 } },
               '过滤规则两端必须一致，否则会互相误判删除。',
             ),
           ),
@@ -1440,6 +1590,13 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------ 创建向导 */
 
+    /**
+     * 创建向导。
+     *
+     * 第一步只让人做两件事：填中继地址、对暗号——6 位通道码。
+     * 32 位房间码、密钥、邀请串都默认收进「高级配置」并打码：它们不是给人念的，
+     * 创建端那套配置会通过配对通道原样送到加入端，谁都不用抄。
+     */
     function Wizard({ onClose, store }) {
       const [step, setStep] = React.useState(0)
       const [busy, setBusy] = React.useState(false)
@@ -1450,13 +1607,20 @@ window.__ModuleLoader__.load({
       const [pairNonce, setPairNonce] = React.useState(0)
       // 对方已经建好任务、只是暂时不在等待房间里：点「先建我这边」才放行
       const [skipPair, setSkipPair] = React.useState(false)
+      // 高级配置默认收起、内容默认打码：这东西不该出现在随手一张截图里
+      const [adv, setAdv] = React.useState(false)
+      const [reveal, setReveal] = React.useState(false)
+      // 配对成功就锁住通道码：它已经完成使命，还能改只会把对端甩在半路
+      const [locked, setLocked] = React.useState(false)
       const [form, setForm] = React.useState({
-        server: '',
-        // 默认就生成一个随机房间码：不用再想名字，也不用去中继登记
+        // 中继地址记住上次用的；没有记录就跟着已有任务走，仍然没有才留空
+        server: loadRelay() || shortServer(store.data?.tasks?.[0]?.server) || '',
+        channel: newChannel(),
+        // 默认就生成一个随机房间码：不用想名字，也不用去中继登记
         workspace: newRoomCode(),
-        // 密钥（中继没配房间密钥时留空即可，等于用房间码）
         token: '',
         joinText: '',
+        adopted: false,
         root: '',
         name: '',
         mode: 'bidirectional',
@@ -1464,51 +1628,96 @@ window.__ModuleLoader__.load({
         ext: '',
       })
 
+      const channel = digitsOnly(form.channel).slice(0, 6)
+      const remembered = loadRelay()
+      const channelReady = channel.length === 6
       const room = form.workspace.trim()
       const secret = form.token.trim() || room
       const normalized = normalizeServer(form.server)
       const serverReady = /^wss?:\/\/[^\s/]+/.test(normalized)
+      const paired = pair.state === 'paired'
+      // 三种是「配置被证伪」，必须拦住并让人去改
+      const pairBroken =
+        pair.state === 'denied' || pair.state === 'unreachable' || pair.state === 'error'
 
-      const copyInvite = async () => {
-        const text = inviteOf(form.server, room, secret)
+      // 第一步必须先配对成功才能往下走。唯一例外：对方已经建好任务、只是暂时不在等待房间里，
+      // 那种情况给一个显式的「先建我这边」出口，否则先建的人会被永远锁在第一步。
+      const pairingDone = paired || skipPair
+
+      const patch = (next) => setForm((prev) => ({ ...prev, ...next }))
+
+      // 创建端把自己那套配置挂到配对通道上；加入端只等着收
+      const announce = entry === 'create' && room ? `${room}|${secret}` : ''
+
+      const copyPair = async () => {
+        const text = channelInviteOf(form.server, channel)
         try {
           await navigator.clipboard.writeText(text)
-          store.notify('邀请已复制，发给对方即可', 'ok')
+          store.notify('邀请已复制：含中继地址与 6 位通道码', 'ok')
         } catch {
           store.notify(`复制失败，可手动复制：${text}`, 'bad')
         }
       }
 
+      const copyInvite = async () => {
+        const text = inviteOf(form.server, room, secret)
+        try {
+          await navigator.clipboard.writeText(text)
+          store.notify('完整邀请已复制（含房间码与密钥）', 'ok')
+        } catch {
+          store.notify(`复制失败，可手动复制：${text}`, 'bad')
+        }
+      }
+
+      const switchEntry = (next) => {
+        if (next === entry) return
+        setEntry(next)
+        setLocked(false)
+        setSkipPair(false)
+        if (next === 'create') {
+          patch({
+            channel: channelReady ? channel : newChannel(),
+            workspace: room || newRoomCode(),
+            token: '',
+            adopted: false,
+          })
+        } else {
+          // 加入端从零开始：通道码要现填，房间码得靠对端传，留着旧的只会让人以为已经配好了
+          patch({ channel: '', workspace: '', token: '', joinText: '', adopted: false })
+        }
+      }
+
       /**
-       * 配对 = 两端在同一个房间里互相看见，连接由 daemon 代连。
+       * 配对 = 两端在同一个配对通道里互相看见，连接由 daemon 代连。
        *
        * 为什么不在浏览器里连：面板跑在 dsh 页面里，CSP 与混合内容（https 页面连 ws://）
        * 会直接掐掉到中继的 WebSocket——旧版「永远连不上、永远等不到对端」就是这么来的。
        * 同一台机器上的 daemon 连得没问题，所以这一步交给它。
        *
-       * 为什么进 `<房间码>::pair`：中继按房间名配对、一间只容 2 端。直接挤进真房间会和
+       * 为什么进 `<通道码>::pair`：中继按房间名配对、一间只容 2 端。直接挤进真房间会和
        * 正在同步的 daemon 抢位，还可能被对方当成同步对端白等一轮；旁路房间里只有两端的
        * 向导，配对看得见，也不打扰真正的同步。
+       *
+       * `announce` 是「见面礼」：创建端把 `房间码|密钥` 交给 daemon，daemon 编进 Hello 的
+       * device_id，中继再原样塞进 PeerStatus 推给同房间的另一端——6 位码负责见面，
+       * 32 位房间码负责安全，两件事分开。
        */
       React.useEffect(() => {
-        if (step !== 0 || busy) return undefined
-        const url = normalizeServer(form.server)
-        const code = form.workspace.trim()
-        if (!/^wss?:\/\/[^\s/]+/.test(url) || !code) {
-          setPair({ state: 'idle', peer: '', error: '', room: '' })
+        if (step !== 0 || busy || !serverReady || !channelReady) {
+          if (step === 0) setPair({ state: 'idle', peer: '', error: '', room: '' })
           return undefined
         }
         let alive = true
-        // 房间码是一个字一个字敲的，等停顿再开，别让中继的每分钟配额白烧
+        // 通道码是一个键一个键敲的，等停顿再开，别让中继的每分钟配额白烧
         const timer = setTimeout(async () => {
           try {
             const body = await api('/presence', {
               method: 'POST',
-              body: { server: url, workspace: code, token: form.token.trim() || code },
+              body: { server: normalized, workspace: channel, token: channel, announce },
             })
             if (alive && body?.presence) setPair(body.presence)
           } catch (e) {
-            if (alive) setPair({ state: 'error', peer: '', error: e.message, room: code })
+            if (alive) setPair({ state: 'error', peer: '', error: e.message, room: channel })
           }
         }, 500)
         return () => {
@@ -1517,21 +1726,18 @@ window.__ModuleLoader__.load({
           // 离开第一步就退出等待房间：别让位置一直占着
           void api('/presence/stop', { method: 'POST' }).catch(() => {})
         }
-      }, [step, busy, form.server, form.workspace, form.token, pairNonce])
+      }, [step, busy, normalized, channel, channelReady, serverReady, announce, pairNonce])
 
       // 守护进程会自己重连、自己更新状态，这里只负责把最新状态取回来。
-      // 地址/房间码还没填全时不轮询：否则会把上一次残留的「已配对」当成真的。
+      // 地址/通道码还没填全时不轮询：否则会把上一次残留的「已配对」当成真的。
       React.useEffect(() => {
-        if (step !== 0 || busy) return undefined
-        const url = normalizeServer(form.server)
-        const code = form.workspace.trim()
-        if (!/^wss?:\/\/[^\s/]+/.test(url) || !code) return undefined
+        if (step !== 0 || busy || !serverReady || !channelReady) return undefined
         let alive = true
         const tick = async () => {
           try {
             const body = await api('/presence')
-            // 守护进程里可能还留着上一组配置的结论，房间对不上就不认
-            if (alive && body?.presence && (!body.presence.room || body.presence.room === code)) {
+            // 守护进程里可能还留着上一组配置的结论，通道对不上就不认
+            if (alive && body?.presence && (!body.presence.room || body.presence.room === channel)) {
               setPair(body.presence)
             }
           } catch {
@@ -1544,57 +1750,69 @@ window.__ModuleLoader__.load({
           alive = false
           clearInterval(timer)
         }
-      }, [step, busy, form.server, form.workspace, form.token])
+      }, [step, busy, normalized, channel, channelReady, serverReady])
 
-      const paired = pair.state === 'paired'
-      // 这三种是「配置被证伪」，必须拦住并让人去改
-      const pairBroken =
-        pair.state === 'denied' || pair.state === 'unreachable' || pair.state === 'error'
+      // 加入端：从对端的见面礼里把房间码、密钥接过来。已经在加入前手填过就不覆盖。
+      React.useEffect(() => {
+        if (entry !== 'join' || room) return
+        const found = peerInvite(pair.peer)
+        if (!found) return
+        patch({
+          workspace: found.room,
+          token: found.token === found.room ? '' : found.token,
+          adopted: true,
+        })
+      }, [entry, room, pair.peer])
+
+      React.useEffect(() => {
+        if (!paired) return
+        setLocked(true)
+        // 配对通了说明这个地址是对的，记下来下次直接带出（用户中途放弃也算数）
+        saveRelay(form.server)
+      }, [paired, form.server])
 
       const pairTitle = () => {
         if (pair.state === 'paired') return '配对已通过'
         if (pair.state === 'waiting') return '已连上中继，正在等对方'
         if (pair.state === 'connecting') return '正在连接中继…'
-        if (pair.state === 'denied') return '中继拒绝了密钥'
+        if (pair.state === 'denied') return '中继拒绝了配对通道'
         if (pair.state === 'unreachable') return '连不上中继'
         if (pair.state === 'error') return '配对没跑起来'
-        return '还没开始配对'
+        return channelReady ? '还没开始配对' : '先填 6 位通道码'
       }
 
       const pairHint = () => {
         if (pair.state === 'paired') {
-          const who = pair.peer ? `（对端 ${String(pair.peer).slice(0, 8)}）` : ''
-          return `两端已经在中继里互相看见${who}，配对成功，可以继续设置目录；建好任务后会自动开始同步。`
+          const who = pair.peer ? `（对端 ${String(pair.peer).slice(0, 12)}…）` : ''
+          const carried = form.adopted ? '对端的房间码与密钥已自动带过来（默认隐藏，可在高级配置里查看）。' : ''
+          return `两端已经在中继里互相看见${who}，配对成功，可以继续设置目录；建好任务后会自动开始同步。${carried}`
         }
         if (pair.state === 'waiting') {
-          return '这个房间现在只有你一端。让对方打开「文件同步 → 创建同步任务 → 加入已有同步」，'
-            + '粘上面那条邀请串（或手填同一个房间码），这边会自动变成「配对已通过」。'
+          return '这个配对通道现在只有你一端。让对方在「通道码」里填同一个 6 位数字（或粘你复制的邀请），'
+            + '这边会自动变成「配对已通过」。'
         }
         if (pair.state === 'connecting') return '后台服务正在连中继，一两秒后会有结果。'
         if (pair.state === 'denied') {
-          return '房间码或密钥与中继配置不一致。中继没配房间密钥时，密钥就等于房间码，这里留空即可。'
+          return '中继开了房间级密钥（SYNC_ROOM_TOKENS）时，配对通道也得放行：'
+            + '给 SYNC_ROOMS 加一条 "*" 兜底密钥，或关掉房间级密钥。'
         }
         if (pair.state === 'unreachable') {
           return `${pair.error || '检查 IP 与端口'}。端口不是默认值就写全，例如 192.168.3.222:18443。`
         }
         if (pair.state === 'error') return `后台服务没响应：${pair.error || '重启 dsh 再试'}`
-        return '填好中继地址与房间码会自动开始配对；两端都进同一个房间才算配对成功。'
+        return '填好中继地址与 6 位通道码会自动开始配对；两端在同一个通道里才算配对成功。'
       }
 
       const issues = []
-      if (!room) issues.push('未填写房间码')
       if (!serverReady) issues.push('只填服务器 IP 或 IP:端口即可')
+      if (step === 0 && !channelReady) issues.push('通道码要 6 位数字')
+      if (pairingDone && !room) issues.push('还没拿到房间码：让对方先「创建新同步」并保持配对')
       if (step >= 1) {
         if (!form.root.trim()) issues.push('未选择同步目录')
         else if (!/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(form.root.trim())) {
           issues.push('需要填绝对路径，例如 D:\\Sync')
         }
       }
-
-      // 第一步必须先配对成功才能往下走（这是明确的产品要求）。
-      // 唯一例外：对方已经建好任务、只是暂时不在等待房间里——那种情况给一个显式的
-      // 「先建我这边」出口，否则先建的人会被永远锁在第一步。
-      const pairingDone = paired || skipPair
 
       const create = async () => {
         setBusy(true)
@@ -1622,8 +1840,9 @@ window.__ModuleLoader__.load({
                   },
                 },
               }),
-            '任务已创建，把邀请串发给对方就能开始同步',
+            '任务已创建，把通道码给对方就能开始同步',
           )
+          saveRelay(form.server)
           onClose()
         } catch {
           /* toast 已提示 */
@@ -1652,56 +1871,80 @@ window.__ModuleLoader__.load({
           className: 'ws-input',
           value: form.server,
           placeholder: '192.168.3.222 或 192.168.3.222:18443',
-          onChange: (e) => setForm({ ...form, server: e.target.value }),
+          onChange: (e) => patch({ server: e.target.value }),
         }),
         h(
           'div',
           { className: 'ws-hint' },
           `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}；协议头与 /ws 会自动补上`,
         ),
+        // 值来自上次保存时点明一句，免得让人以为是自己填的
+        remembered && form.server.trim() === remembered
+          ? h('div', { className: 'ws-hint' }, '已带出上次用的中继地址；换中继直接改这里，保存后会自动记住')
+          : null,
         h('div', { className: 'ws-hint ws-mono' }, `将连接 ${normalized || '（待填写）'}`),
       )
 
-      const roomField = h(
+      const channelField = h(
         'div',
         { className: 'ws-field' },
-        h('label', null, '房间码'),
+        h('label', null, '通道码'),
         h(
           'div',
-          { className: 'ws-field-row' },
+          { className: 'ws-field-row ws-channel-row' },
           h('input', {
-            className: 'ws-input',
-            value: form.workspace,
-            placeholder: '两端必须一致',
-            onChange: (e) => setForm({ ...form, workspace: e.target.value }),
+            className: 'ws-input ws-channel',
+            value: form.channel,
+            disabled: locked,
+            inputMode: 'numeric',
+            autoComplete: 'off',
+            maxLength: 6,
+            placeholder: '6 位数字',
+            onChange: (e) => patch({ channel: digitsOnly(e.target.value).slice(0, 6) }),
           }),
+          entry === 'create'
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'ws-btn',
+                  disabled: locked,
+                  onClick: () => {
+                    setLocked(false)
+                    patch({ channel: newChannel() })
+                  },
+                },
+                '换一个',
+              )
+            : null,
+        ),
+        h(
+          'div',
+          { className: 'ws-hint' },
+          locked
+            ? '配对已完成，通道码锁定；要换一组配置就点「重新配对」。'
+            : entry === 'create'
+              ? '把这 6 位数字告诉对方（或点下面「复制邀请」把整串发过去），对方填同一个就能配对。'
+              : '填对方给你的 6 位数字；配对通过后房间码与密钥会自动带过来，不用手抄。',
+        ),
+        h(
+          'div',
+          { className: 'ws-row', style: { marginTop: 6, gap: 8 } },
           h(
             'button',
-            { type: 'button', className: 'ws-btn', onClick: () => setForm({ ...form, workspace: newRoomCode() }) },
-            '换一个',
+            {
+              type: 'button',
+              className: 'ws-btn',
+              disabled: !serverReady || !channelReady || locked,
+              onClick: () => void copyPair(),
+            },
+            '复制邀请',
           ),
-        ),
-        h(
-          'div',
-          { className: 'ws-hint' },
-          '随机码就是房间，也是默认密钥；不用去中继登记，也不用起名字',
-        ),
-      )
-
-      const tokenField = h(
-        'div',
-        { className: 'ws-field' },
-        h('label', null, '密钥（可选）'),
-        h('input', {
-          className: 'ws-input',
-          value: form.token,
-          placeholder: '留空则与房间码相同',
-          onChange: (e) => setForm({ ...form, token: e.target.value }),
-        }),
-        h(
-          'div',
-          { className: 'ws-hint' },
-          '只有中继启动时配了房间密钥（SYNC_ROOM_TOKENS）才需要填；两端必须填同一把',
+          h(
+            'span',
+            { className: 'ws-hint', style: { margin: 0 } },
+            '含中继地址与通道码，对方粘进「加入已有同步」即可',
+          ),
         ),
       )
 
@@ -1738,14 +1981,14 @@ window.__ModuleLoader__.load({
                     style: { marginTop: 6 },
                     onClick: () => {
                       setSkipPair(true)
-                      store.notify('已允许先建任务：对方用同一条邀请串加入后会自动同步', 'warn')
+                      store.notify('已允许先建任务：对方用同一个通道码加入后会自动同步', 'warn')
                     },
                   },
                   '对方已经建好任务了？先建我这边，稍后自动连上 ›',
                 )
               : null,
             skipPair && !paired
-              ? h('div', { className: 'ws-hint' }, '已跳过配对等待：建好后把邀请串给对方，对方加入时两端会自动握手。')
+              ? h('div', { className: 'ws-hint' }, '已跳过配对等待：建好后把 6 位通道码给对方，对方加入时两端会自动握手。')
               : null,
           ),
           h(
@@ -1758,6 +2001,7 @@ window.__ModuleLoader__.load({
               disabled: pair.state === 'connecting',
               onClick: () => {
                 setSkipPair(false)
+                setLocked(false)
                 setPairNonce((n) => n + 1)
               },
             },
@@ -1766,22 +2010,163 @@ window.__ModuleLoader__.load({
         ),
       )
 
-      const inviteCard = h(
-        'div',
-        { className: 'ws-field' },
-        h('label', null, '邀请串'),
-        h('div', { className: 'ws-hint ws-mono', style: { wordBreak: 'break-all', marginBottom: 6 } },
-          form.server.trim() ? inviteOf(form.server, room, secret) : '（填写中继地址后生成）'),
+      /**
+       * 高级配置：房间码、密钥、邀请串。
+       * 三样都默认打码——房间码 32 位、密钥、整条邀请串，都是「一旦被看见就等于交出去了」的东西。
+       */
+      const secretInput = (label, key, hint, options = {}) =>
         h(
-          'button',
-          { type: 'button', className: 'ws-btn', disabled: !form.server.trim() || !room, onClick: () => void copyInvite() },
-          '复制邀请',
+          'div',
+          { className: 'ws-field' },
+          h('label', null, label),
+          h(
+            'div',
+            { className: 'ws-field-row' },
+            h('input', {
+              className: 'ws-input',
+              type: reveal ? 'text' : 'password',
+              value: form[key] ?? '',
+              disabled: Boolean(options.disabled),
+              placeholder: options.placeholder ?? '',
+              onChange: (e) => patch({ [key]: e.target.value, ...(options.onEdit ?? {}) }),
+            }),
+            options.action ?? null,
+          ),
+          h('div', { className: 'ws-hint' }, hint),
+        )
+
+      const advanced = h(
+        'div',
+        null,
+        h(
+          'div',
+          { className: 'ws-adv-head' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'ws-link',
+              onClick: () => {
+                setAdv((v) => !v)
+                if (adv) setReveal(false)
+              },
+            },
+            adv ? '收起高级配置 ‹' : '高级配置：房间码 / 密钥 / 邀请串 ›',
+          ),
+          adv
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'ws-btn ws-btn-ghost',
+                  onClick: () => setReveal((v) => !v),
+                },
+                reveal ? '隐藏内容' : '显示内容',
+              )
+            : null,
         ),
-        h('div', { className: 'ws-hint' }, '整串发给对方，对方粘进「加入已有同步」就能带着地址、房间码、密钥一起填好'),
+        adv
+          ? h(
+              'div',
+              { style: { marginTop: 10 } },
+              secretInput(
+                `房间码（${room.length} 字符）`,
+                'workspace',
+                '32 位随机串，就是中继里的房间名；配对成功后会自动传给对方',
+                {
+                  disabled: locked,
+                  placeholder: entry === 'join' ? '配对后自动带入' : '',
+                  onEdit: { adopted: false },
+                  action:
+                    entry === 'create'
+                      ? h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'ws-btn',
+                            disabled: locked,
+                            onClick: () => patch({ workspace: newRoomCode(), token: '', adopted: false }),
+                          },
+                          '换一个',
+                        )
+                      : null,
+                },
+              ),
+              secretInput('密钥', 'token', '只有中继配了房间密钥（SYNC_ROOM_TOKENS）才需要填；两端必须同一把，留空即跟随房间码', {
+                disabled: locked,
+                placeholder: '留空则与房间码相同',
+              }),
+              h(
+                'div',
+                { className: 'ws-field' },
+                h('label', null, '邀请串'),
+                h(
+                  'div',
+                  { className: 'ws-field-row' },
+                  h('input', {
+                    className: 'ws-input ws-mono',
+                    type: reveal ? 'text' : 'password',
+                    readOnly: true,
+                    value: room && serverReady ? inviteOf(form.server, room, secret) : '',
+                    placeholder: '（填好地址与房间码后生成）',
+                  }),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'ws-btn',
+                      disabled: !room || !serverReady,
+                      onClick: () => void copyInvite(),
+                    },
+                    '复制',
+                  ),
+                ),
+                h('div', { className: 'ws-hint' }, '给「不填通道码、直接粘邀请」的人用；含房间码与密钥，别发到群里'),
+              ),
+            )
+          : null,
       )
 
       const body = () => {
         if (step === 0) {
+          const joinField =
+            entry === 'join'
+              ? h(
+                  'div',
+                  { className: 'ws-field' },
+                  h('label', null, '邀请串（可选）'),
+                  h('input', {
+                    className: 'ws-input',
+                    placeholder: 'ws://192.168.3.222:18444/ws?pair=482917，或直接填 6 位通道码',
+                    value: form.joinText,
+                    onChange: (e) => {
+                      const text = e.target.value
+                      const inv = parseInvite(text)
+                      if (inv) {
+                        patch({
+                          joinText: text,
+                          // 界面里统一显示 host:port，不把 ws://…/ws 这种写法摊给用户
+                          server: inv.server ? shortServer(inv.server) : form.server,
+                          channel: inv.channel || channel,
+                          workspace: inv.room || '',
+                          token: inv.room && inv.token !== inv.room ? inv.token : '',
+                          adopted: false,
+                        })
+                      } else {
+                        patch({ joinText: text })
+                      }
+                    },
+                  }),
+                  h(
+                    'div',
+                    { className: 'ws-hint' },
+                    room && !channelReady
+                      ? '已从这串里带出房间码；配对还要对方那 6 位通道码'
+                      : '粘整串会自动填好地址与通道码；也可以只填下面那 6 位数字',
+                  ),
+                )
+              : null
+
           return h(
             'div',
             null,
@@ -1794,7 +2179,7 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   className: 'ws-tab',
                   'data-active': entry === 'join' ? 'true' : 'false',
-                  onClick: () => setEntry('join'),
+                  onClick: () => switchEntry('join'),
                 },
                 '加入已有同步',
               ),
@@ -1804,52 +2189,16 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   className: 'ws-tab',
                   'data-active': entry === 'create' ? 'true' : 'false',
-                  onClick: () => setEntry('create'),
+                  onClick: () => switchEntry('create'),
                 },
                 '创建新同步',
               ),
             ),
-            entry === 'join'
-              ? h(
-                  'div',
-                  null,
-                  h(
-                    'div',
-                    { className: 'ws-field' },
-                    h('label', null, '邀请串'),
-                    h('input', {
-                      className: 'ws-input',
-                      placeholder: 'ws://192.168.3.222:18443/ws?workspace=…&token=…',
-                      value: form.joinText,
-                      onChange: (e) => {
-                        const text = e.target.value
-                        const inv = parseInvite(text)
-                        if (inv) {
-                          setForm({
-                            ...form,
-                            joinText: text,
-                            // 界面里统一显示 host:port，不把 ws://…/ws 这种写法摊给用户
-                            server: inv.server ? shortServer(inv.server) : form.server,
-                            workspace: inv.room,
-                            token: inv.token && inv.token !== inv.room ? inv.token : '',
-                          })
-                        } else {
-                          setForm({ ...form, joinText: text })
-                        }
-                      },
-                    }),
-                    h(
-                      'div',
-                      { className: 'ws-hint' },
-                      '粘贴整串即可带出下面三项；只有 6 位数字也会当成旧版配对码（房间 pair-xxxxxx）',
-                    ),
-                  ),
-                  serverField,
-                  roomField,
-                  tokenField,
-                )
-              : h('div', null, serverField, roomField, tokenField, inviteCard),
+            joinField,
+            serverField,
+            channelField,
             pairCard,
+            advanced,
           )
         }
         if (step === 1) {
@@ -1864,7 +2213,7 @@ window.__ModuleLoader__.load({
                 className: 'ws-input',
                 value: form.root,
                 placeholder: 'D:\\Sync',
-                onChange: (e) => setForm({ ...form, root: e.target.value }),
+                onChange: (e) => patch({ root: e.target.value }),
               }),
               h(
                 'div',
@@ -1880,7 +2229,7 @@ window.__ModuleLoader__.load({
                 className: 'ws-input',
                 value: form.name,
                 placeholder: '留空则用目录名',
-                onChange: (e) => setForm({ ...form, name: e.target.value }),
+                onChange: (e) => patch({ name: e.target.value }),
               }),
             ),
           )
@@ -1897,7 +2246,7 @@ window.__ModuleLoader__.load({
               {
                 className: 'ws-select',
                 value: form.mode,
-                onChange: (e) => setForm({ ...form, mode: e.target.value }),
+                onChange: (e) => patch({ mode: e.target.value }),
               },
               h('option', { value: 'bidirectional' }, '双向同步'),
               h('option', { value: 'upload_only' }, '仅上传（本机 → 对端）'),
@@ -1912,7 +2261,7 @@ window.__ModuleLoader__.load({
               className: 'ws-input',
               value: form.ext,
               placeholder: 'lnk,tmp',
-              onChange: (e) => setForm({ ...form, ext: e.target.value }),
+              onChange: (e) => patch({ ext: e.target.value }),
             }),
           ),
           h(
@@ -1931,7 +2280,9 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-sub' },
-              `⇄  ${shortServer(normalized)}  ·  房间 ${room}  ·  密钥 ${form.token.trim() ? '自定义' : '同房间码'}`,
+              `⇄  ${shortServer(normalized)}  ·  通道码 ${channel || '—'}  ·  房间 ${shortRoom(room) || '—'}  ·  密钥 ${
+                form.token.trim() ? '自定义' : '同房间码'
+              }`,
             ),
             h(
               'div',
@@ -1978,15 +2329,14 @@ window.__ModuleLoader__.load({
                   {
                     className: 'ws-btn ws-btn-primary',
                     // 第一步必须配对成功（或明确点了「先建我这边」）才放行
-                    disabled:
-                      issues.length > 0 || (step === 0 && !pairingDone),
+                    disabled: issues.length > 0 || (step === 0 && !pairingDone),
                     title:
                       issues.length > 0
                         ? issues.join('；')
                         : step === 0 && !pairingDone
                           ? pairBroken
                             ? pairHint()
-                            : '先完成配对：等对方进入同一个房间，这里会自动通过'
+                            : '先完成配对：让对方填同一个通道码，这里会自动通过'
                           : '',
                     onClick: () => setStep(step + 1),
                   },
@@ -2039,17 +2389,22 @@ window.__ModuleLoader__.load({
      * profile 里是硬链快照、仓库工作区又是另一份。让界面自己报版本，就不用猜了。
      * 点一下复制完整信息（版本 / 提交 / 分支 / 打包时间 / 目录），贴到 issue 里够用。
      */
+    /**
+     * 侧栏底部常驻一行「v0.8.0」。
+     *
+     * 排查时最费时间的一类问题是「我明明装了新版，界面还是旧的」——bundle 由页面加载时注入、
+     * profile 里是硬链快照、仓库工作区又是另一份。让界面自己报版本号，就不用猜了。
+     * 只报版本：提交号、分支、是否 dirty 这些是打包机上的事，摆在这里对用户没有意义。
+     * 点一下复制完整信息（版本 / 打包时间 / 目录），贴到 issue 里够用。
+     */
     function VersionBadge({ store }) {
       const self = store.self
       if (!self) return null
 
-      const short = `v${self.label ?? self.version}`
+      const short = `v${self.version ?? '—'}`
       const detail = [
-        `dsh-winsync ${self.version}`,
-        `提交    ${self.commit ?? '未知'}${self.commitSource ? `（来源：${self.commitSource}）` : ''}`,
-        self.branch ? `分支    ${self.branch}` : null,
+        `dsh-winsync ${self.version ?? '未知版本'}`,
         self.builtAt ? `打包    ${self.builtAt}` : null,
-        self.dirty ? '工作区  有未提交改动' : null,
         `目录    ${self.dir ?? '—'}`,
       ]
         .filter(Boolean)
@@ -2060,7 +2415,7 @@ window.__ModuleLoader__.load({
           await navigator.clipboard.writeText(detail)
           store.notify('版本信息已复制', 'ok')
         } catch {
-          store.notify(`复制失败：${self.version} / ${self.commit ?? '未知提交'}`, 'bad')
+          store.notify(`复制失败：${self.version ?? '未知版本'}`, 'bad')
         }
       }
 
@@ -2068,7 +2423,6 @@ window.__ModuleLoader__.load({
         'button',
         {
           className: 'ws-ver',
-          'data-dirty': self.dirty ? 'true' : 'false',
           title: `${detail}\n\n点击复制`,
           'aria-label': `插件 ${short}，点击复制版本信息`,
           onClick: () => void copy(),
@@ -2150,12 +2504,9 @@ window.__ModuleLoader__.load({
                 'div',
                 {
                   className: 'ws-banner',
-                  style: {
-                    margin: '12px 24px 0',
-                    background: '#2A1715',
-                    borderColor: '#5A2A26',
-                    color: '#FFB4AF',
-                  },
+                  // tone 走 CSS 变量：深浅主题各有一套「危险」底色，别再写死深红
+                  'data-tone': 'bad',
+                  style: { margin: '12px 24px 0' },
                 },
                 h('span', null, `同步服务不可用：${store.error.message}`),
                 h('button', { className: 'ws-link', onClick: () => void store.refresh() }, '重试'),
