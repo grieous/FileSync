@@ -208,6 +208,9 @@ window.__ModuleLoader__.load({
 .ws-field .ws-input.ws-channel[disabled]{background:var(--ws-btn-off-bg);border-color:var(--ws-btn-off-line);
   color:var(--ws-btn-off-text);cursor:not-allowed}
 .ws-channel-row .ws-btn{height:44px}
+/* IP 与端口两栏：端口固定窄一点，IP 吃掉剩下的宽度 */
+.ws-field-row.ws-relay-row{display:grid;grid-template-columns:1fr 132px;gap:8px}
+.ws-field .ws-input.ws-port{font-family:ui-monospace,Consolas,monospace;text-align:center;letter-spacing:.06em}
 .ws-adv-head{display:flex;align-items:center;justify-content:space-between;gap:8px;
   margin-top:12px;padding-top:10px;border-top:1px solid var(--ws-line-soft)}
 .ws-overlay{position:absolute;inset:0;background:rgba(0,0,0,.55);display:flex;
@@ -367,6 +370,38 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 地址拆成「IP/主机」与「端口」两栏：分开填少打字，也不用记冒号规则。
+     * 存储里仍然是一整串 `host:port`，跟任务里的 server 同构，读出来再拆开。
+     */
+    function splitRelay(text) {
+      const raw = String(text ?? '')
+        .trim()
+        .replace(/^\s*wss?:\/\//i, '')
+        .replace(/\/.*$/, '')
+      if (!raw) return { host: '', port: '' }
+      // IPv6 字面量（[::1]:18443）按方括号拆；裸 IPv6 不猜，整串当主机
+      if (raw.startsWith('[')) {
+        const close = raw.indexOf(']')
+        if (close > 0) {
+          const rest = raw.slice(close + 1)
+          return { host: raw.slice(0, close + 1), port: rest.startsWith(':') ? rest.slice(1).trim() : '' }
+        }
+        return { host: raw, port: '' }
+      }
+      const cut = raw.lastIndexOf(':')
+      if (cut <= 0) return { host: raw, port: '' }
+      return { host: raw.slice(0, cut).trim(), port: raw.slice(cut + 1).trim() }
+    }
+
+    /** 两栏拼回 daemon 认得的那一串；端口留空就不写冒号，交给默认端口兜底。 */
+    function joinRelay(host, port) {
+      const name = String(host ?? '').trim()
+      if (!name) return ''
+      const tail = digitsOnly(port).slice(0, 5)
+      return tail ? `${name}:${tail}` : name
+    }
+
+    /**
      * 界面只让用户填 IP 或 IP:端口，协议头 / 路径 / 默认端口都在这里补。
      * 已经写了 ws:// 或 wss:// 的完整地址原样保留——老配置和反代部署不受影响。
      */
@@ -465,46 +500,6 @@ window.__ModuleLoader__.load({
       params.set('workspace', code)
       params.set('token', String(token ?? '').trim() || code)
       return `${url}?${params.toString()}`
-    }
-
-    /**
-     * 通道码那份邀请：只带地址与 6 位码，粘到「加入已有同步」里能直接填好两栏。
-     * 房间码与密钥不在这里——它们靠配对通道传，见 `peerInvite`。
-     */
-    function channelInviteOf(server, channel) {
-      const url = normalizeServer(server)
-      const code = digitsOnly(channel)
-      if (!code) return url
-      return `${url}?pair=${code}`
-    }
-
-    /**
-     * 反过来：把粘进来的文本拆成服务器 / 房间码 / 密钥 / 通道码。
-     * 认四种写法：完整邀请串（带 workspace）、通道码邀请串（带 pair）、
-     * 旧的 `...#房间码`、单独的房间码或 6 位数字。
-     */
-    function parseInvite(text) {
-      const raw = String(text ?? '').trim()
-      if (!raw) return null
-      const full = /^(wss?:\/\/[^\s#?]+)(?:\?([^\s#]*))?(?:#([^\s]*))?$/i.exec(raw)
-      if (full) {
-        const query = new URLSearchParams(full[2] ?? '')
-        const channel = digitsOnly(query.get('pair') ?? '')
-        if (channel) {
-          const server = full[1]
-          return { server, channel, room: '', token: '' }
-        }
-        const hashRoom = String(full[3] ?? '').trim()
-        const room = String(query.get('workspace') ?? query.get('room') ?? hashRoom ?? '').trim()
-        if (!room) return null
-        const token = String(query.get('token') ?? '').trim() || room
-        return { server: full[1], room, token, channel: '' }
-      }
-      if (/^\d{6}$/.test(raw)) return { server: '', channel: raw, room: '', token: '' }
-      if (/^\S{4,}$/.test(raw) && !/[\\/]/.test(raw)) {
-        return { server: '', room: raw, token: raw, channel: '' }
-      }
-      return null
     }
 
     /**
@@ -896,7 +891,7 @@ window.__ModuleLoader__.load({
               { className: 'ws-issues', title: rt.last_error },
               // 等对端是正常状态（对方还没加入），不该按「失败」的措辞显示
               waitingPeer(rt.last_error)
-                ? '等待对端上线：对方还没用同一条邀请串建任务，或那边的 dsh 没在运行'
+                ? '等待对端上线：对方还没建同一个房间的任务，或那边的 dsh 没在运行'
                 : // 正在同步或已暂停时，这条是「上一轮」的结果；否则状态行已经说了「同步失败」
                   rt.running || task.paused
                   ? `上次失败：${rt.last_error}`
@@ -1353,7 +1348,7 @@ window.__ModuleLoader__.load({
         maxMb: task.filter?.size_max ? task.filter.size_max / MB : 0,
       })
       const [busy, setBusy] = React.useState(false)
-      // 房间码、密钥、邀请串共用一个「显示」开关：默认都是密文
+      // 房间码与密钥共用一个「显示」开关：默认都是密文
       const [reveal, setReveal] = React.useState(false)
 
       // 密钥不进 /state（那里只有 has_token），打开设置时按需取一次：
@@ -1594,7 +1589,7 @@ window.__ModuleLoader__.load({
      * 创建向导。
      *
      * 第一步只让人做两件事：填中继地址、对暗号——6 位通道码。
-     * 32 位房间码、密钥、邀请串都默认收进「高级配置」并打码：它们不是给人念的，
+     * 32 位房间码与密钥都默认收进「高级配置」并打码：它们不是给人念的，
      * 创建端那套配置会通过配对通道原样送到加入端，谁都不用抄。
      */
     function Wizard({ onClose, store }) {
@@ -1612,14 +1607,19 @@ window.__ModuleLoader__.load({
       const [reveal, setReveal] = React.useState(false)
       // 配对成功就锁住通道码：它已经完成使命，还能改只会把对端甩在半路
       const [locked, setLocked] = React.useState(false)
+      // 配对是「一次性握手」，不是「持续在线」：配上过就是配上过。
+      // 对端随后离开配对房间（它点了下一步、或守护断线重连）不该把这边重新关回去——
+      // 门禁一旦通过就不再回退，否则通道码已经锁死、按钮又不给点，人会被卡死在第一步。
+      const [everPaired, setEverPaired] = React.useState(false)
+      const relay = splitRelay(loadRelay() || shortServer(store.data?.tasks?.[0]?.server) || '')
       const [form, setForm] = React.useState({
-        // 中继地址记住上次用的；没有记录就跟着已有任务走，仍然没有才留空
-        server: loadRelay() || shortServer(store.data?.tasks?.[0]?.server) || '',
+        // 中继地址分 IP 与端口两栏，记住上次用的；没有记录就跟着已有任务走
+        host: relay.host,
+        port: relay.port,
         channel: newChannel(),
         // 默认就生成一个随机房间码：不用想名字，也不用去中继登记
         workspace: newRoomCode(),
         token: '',
-        joinText: '',
         adopted: false,
         root: '',
         name: '',
@@ -1633,39 +1633,31 @@ window.__ModuleLoader__.load({
       const channelReady = channel.length === 6
       const room = form.workspace.trim()
       const secret = form.token.trim() || room
-      const normalized = normalizeServer(form.server)
+      const serverText = joinRelay(form.host, form.port)
+      const normalized = normalizeServer(serverText)
       const serverReady = /^wss?:\/\/[^\s/]+/.test(normalized)
       const paired = pair.state === 'paired'
       // 三种是「配置被证伪」，必须拦住并让人去改
       const pairBroken =
         pair.state === 'denied' || pair.state === 'unreachable' || pair.state === 'error'
 
-      // 第一步必须先配对成功才能往下走。唯一例外：对方已经建好任务、只是暂时不在等待房间里，
-      // 那种情况给一个显式的「先建我这边」出口，否则先建的人会被永远锁在第一步。
-      const pairingDone = paired || skipPair
+      // 第一步必须先配对成功才能往下走。两个例外：
+      //   - 配上过（everPaired）：对端这会儿不在线也不影响，任务建好它会自动连上；
+      //   - 对方已经建好任务、只是不在等待房间里：显式点「先建我这边」。
+      const pairingDone = paired || everPaired || skipPair
 
       const patch = (next) => setForm((prev) => ({ ...prev, ...next }))
 
       // 创建端把自己那套配置挂到配对通道上；加入端只等着收
       const announce = entry === 'create' && room ? `${room}|${secret}` : ''
 
-      const copyPair = async () => {
-        const text = channelInviteOf(form.server, channel)
+      // 界面里只交换 6 位数字：整串邀请已经不再出现在任何输入框里，复制它也没有地方可粘
+      const copyChannel = async () => {
         try {
-          await navigator.clipboard.writeText(text)
-          store.notify('邀请已复制：含中继地址与 6 位通道码', 'ok')
+          await navigator.clipboard.writeText(channel)
+          store.notify(`通道码已复制：${channel}`, 'ok')
         } catch {
-          store.notify(`复制失败，可手动复制：${text}`, 'bad')
-        }
-      }
-
-      const copyInvite = async () => {
-        const text = inviteOf(form.server, room, secret)
-        try {
-          await navigator.clipboard.writeText(text)
-          store.notify('完整邀请已复制（含房间码与密钥）', 'ok')
-        } catch {
-          store.notify(`复制失败，可手动复制：${text}`, 'bad')
+          store.notify(`复制失败，可手动抄下：${channel}`, 'bad')
         }
       }
 
@@ -1673,6 +1665,7 @@ window.__ModuleLoader__.load({
         if (next === entry) return
         setEntry(next)
         setLocked(false)
+        setEverPaired(false)
         setSkipPair(false)
         if (next === 'create') {
           patch({
@@ -1683,7 +1676,7 @@ window.__ModuleLoader__.load({
           })
         } else {
           // 加入端从零开始：通道码要现填，房间码得靠对端传，留着旧的只会让人以为已经配好了
-          patch({ channel: '', workspace: '', token: '', joinText: '', adopted: false })
+          patch({ channel: '', workspace: '', token: '', adopted: false })
         }
       }
 
@@ -1766,15 +1759,19 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         if (!paired) return
+        // 握手只发生一次：记下来，之后对端在不在一块都不再回退门禁
+        setEverPaired(true)
         setLocked(true)
         // 配对通了说明这个地址是对的，记下来下次直接带出（用户中途放弃也算数）
-        saveRelay(form.server)
-      }, [paired, form.server])
+        saveRelay(serverText)
+      }, [paired, serverText])
 
       const pairTitle = () => {
         if (pair.state === 'paired') return '配对已通过'
+        // 配上过又退回等待：握过手就算数，别把标题写成「正在等对方」吓人
+        if (pair.state === 'waiting' && everPaired) return '已配对过，对端当前不在线'
         if (pair.state === 'waiting') return '已连上中继，正在等对方'
-        if (pair.state === 'connecting') return '正在连接中继…'
+        if (pair.state === 'connecting') return everPaired ? '已配对过，正在确认连接…' : '正在连接中继…'
         if (pair.state === 'denied') return '中继拒绝了配对通道'
         if (pair.state === 'unreachable') return '连不上中继'
         if (pair.state === 'error') return '配对没跑起来'
@@ -1788,7 +1785,11 @@ window.__ModuleLoader__.load({
           return `两端已经在中继里互相看见${who}，配对成功，可以继续设置目录；建好任务后会自动开始同步。${carried}`
         }
         if (pair.state === 'waiting') {
-          return '这个配对通道现在只有你一端。让对方在「通道码」里填同一个 6 位数字（或粘你复制的邀请），'
+          if (everPaired) {
+            return '两端已经配过对，门禁不再拦；对端这会儿离开配对房间是正常的（它可能已经进下一步）。'
+              + '直接往下走，任务建好后会自动连上。'
+          }
+          return '这个配对通道现在只有你一端。让对方在「通道码」里填同一个 6 位数字，'
             + '这边会自动变成「配对已通过」。'
         }
         if (pair.state === 'connecting') return '后台服务正在连中继，一两秒后会有结果。'
@@ -1797,7 +1798,7 @@ window.__ModuleLoader__.load({
             + '给 SYNC_ROOMS 加一条 "*" 兜底密钥，或关掉房间级密钥。'
         }
         if (pair.state === 'unreachable') {
-          return `${pair.error || '检查 IP 与端口'}。端口不是默认值就写全，例如 192.168.3.222:18443。`
+          return `${pair.error || '检查 IP 与端口'}。端口填在第二栏，例如 18443。`
         }
         if (pair.state === 'error') return `后台服务没响应：${pair.error || '重启 dsh 再试'}`
         return '填好中继地址与 6 位通道码会自动开始配对；两端在同一个通道里才算配对成功。'
@@ -1823,7 +1824,7 @@ window.__ModuleLoader__.load({
                 method: 'POST',
                 body: {
                   name: form.name,
-                  server: normalizeServer(form.server),
+                  server: normalizeServer(serverText),
                   // 密钥留空就跟随房间码：中继没配房间密钥时它本来就不校验
                   token: secret,
                   workspace: room,
@@ -1842,7 +1843,7 @@ window.__ModuleLoader__.load({
               }),
             '任务已创建，把通道码给对方就能开始同步',
           )
-          saveRelay(form.server)
+          saveRelay(serverText)
           onClose()
         } catch {
           /* toast 已提示 */
@@ -1867,19 +1868,44 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'ws-field' },
         h('label', null, '中继地址'),
-        h('input', {
-          className: 'ws-input',
-          value: form.server,
-          placeholder: '192.168.3.222 或 192.168.3.222:18443',
-          onChange: (e) => patch({ server: e.target.value }),
-        }),
+        // IP 与端口分两栏填：省得记「冒号+端口」的写法，也不会把端口粘成 192.168.3.222:18443:18443
+        h(
+          'div',
+          { className: 'ws-field-row ws-relay-row' },
+          h('input', {
+            className: 'ws-input',
+            value: form.host,
+            placeholder: '192.168.3.222',
+            inputMode: 'url',
+            autoComplete: 'off',
+            onChange: (e) => {
+              const text = e.target.value
+              // 整串地址照样能粘：带冒号或斜杠就自动拆到两栏
+              if (/[:/]/.test(text)) {
+                const parts = splitRelay(text)
+                patch({ host: parts.host, port: parts.port || form.port })
+                return
+              }
+              patch({ host: text.trim() })
+            },
+          }),
+          h('input', {
+            className: 'ws-input ws-port',
+            value: form.port,
+            placeholder: `端口 ${DEFAULT_SYNC_PORT}`,
+            inputMode: 'numeric',
+            autoComplete: 'off',
+            maxLength: 5,
+            onChange: (e) => patch({ port: digitsOnly(e.target.value).slice(0, 5) }),
+          }),
+        ),
         h(
           'div',
           { className: 'ws-hint' },
-          `只填 IP 或 IP:端口，不写端口默认 ${DEFAULT_SYNC_PORT}；协议头与 /ws 会自动补上`,
+          `端口留空按 ${DEFAULT_SYNC_PORT} 处理；协议头与 /ws 会自动补上`,
         ),
         // 值来自上次保存时点明一句，免得让人以为是自己填的
-        remembered && form.server.trim() === remembered
+        remembered && serverText === remembered
           ? h('div', { className: 'ws-hint' }, '已带出上次用的中继地址；换中继直接改这里，保存后会自动记住')
           : null,
         h('div', { className: 'ws-hint ws-mono' }, `将连接 ${normalized || '（待填写）'}`),
@@ -1924,7 +1950,7 @@ window.__ModuleLoader__.load({
           locked
             ? '配对已完成，通道码锁定；要换一组配置就点「重新配对」。'
             : entry === 'create'
-              ? '把这 6 位数字告诉对方（或点下面「复制邀请」把整串发过去），对方填同一个就能配对。'
+              ? '把这 6 位数字告诉对方，让对方填进同一个通道码。'
               : '填对方给你的 6 位数字；配对通过后房间码与密钥会自动带过来，不用手抄。',
         ),
         h(
@@ -1935,15 +1961,11 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               className: 'ws-btn',
-              disabled: !serverReady || !channelReady || locked,
-              onClick: () => void copyPair(),
+              // 锁的是「改」，不是「复制」：再添一台机器时还得念这 6 位
+              disabled: !channelReady,
+              onClick: () => void copyChannel(),
             },
-            '复制邀请',
-          ),
-          h(
-            'span',
-            { className: 'ws-hint', style: { margin: 0 } },
-            '含中继地址与通道码，对方粘进「加入已有同步」即可',
+            '复制通道码',
           ),
         ),
       )
@@ -1961,9 +1983,10 @@ window.__ModuleLoader__.load({
               'div',
               {
                 className: 'ws-pair-title',
-                'data-presence': paired ? 'ok' : pairBroken ? 'bad' : 'idle',
+                // 握过手就是成功：对端随后离开配对房间，不该把这里标成需要处理的黄色/红色
+                'data-presence': paired || (everPaired && !pairBroken) ? 'ok' : pairBroken ? 'bad' : 'idle',
               },
-              paired
+              paired || (everPaired && !pairBroken)
                 ? `✓ ${pairTitle()}`
                 : pairBroken
                   ? `✗ ${pairTitle()}`
@@ -1972,7 +1995,7 @@ window.__ModuleLoader__.load({
                     : pairTitle(),
             ),
             h('div', { className: 'ws-hint' }, pairHint()),
-            !paired && !pairBroken
+            !paired && !everPaired && !pairBroken
               ? h(
                   'button',
                   {
@@ -1987,7 +2010,7 @@ window.__ModuleLoader__.load({
                   '对方已经建好任务了？先建我这边，稍后自动连上 ›',
                 )
               : null,
-            skipPair && !paired
+            skipPair && !paired && !everPaired
               ? h('div', { className: 'ws-hint' }, '已跳过配对等待：建好后把 6 位通道码给对方，对方加入时两端会自动握手。')
               : null,
           ),
@@ -2000,7 +2023,9 @@ window.__ModuleLoader__.load({
               style: { whiteSpace: 'nowrap', flexShrink: 0 },
               disabled: pair.state === 'connecting',
               onClick: () => {
+                // 只有显式重配对才撤掉「配上过」，门禁重新生效
                 setSkipPair(false)
+                setEverPaired(false)
                 setLocked(false)
                 setPairNonce((n) => n + 1)
               },
@@ -2011,8 +2036,9 @@ window.__ModuleLoader__.load({
       )
 
       /**
-       * 高级配置：房间码、密钥、邀请串。
-       * 三样都默认打码——房间码 32 位、密钥、整条邀请串，都是「一旦被看见就等于交出去了」的东西。
+       * 高级配置：房间码、密钥。
+       * 两样都默认打码——32 位房间名与密钥都是「一旦被看见就等于交出去了」的东西。
+       * 邀请串已经从界面上去掉：给出去的只要 6 位通道码，配置由配对通道自己带过去。
        */
       const secretInput = (label, key, hint, options = {}) =>
         h(
@@ -2051,7 +2077,7 @@ window.__ModuleLoader__.load({
                 if (adv) setReveal(false)
               },
             },
-            adv ? '收起高级配置 ‹' : '高级配置：房间码 / 密钥 / 邀请串 ›',
+            adv ? '收起高级配置 ‹' : '高级配置：房间码 / 密钥 ›',
           ),
           adv
             ? h(
@@ -2070,7 +2096,7 @@ window.__ModuleLoader__.load({
               'div',
               { style: { marginTop: 10 } },
               secretInput(
-                `房间码（${room.length} 字符）`,
+                '房间码',
                 'workspace',
                 '32 位随机串，就是中继里的房间名；配对成功后会自动传给对方',
                 {
@@ -2096,77 +2122,12 @@ window.__ModuleLoader__.load({
                 disabled: locked,
                 placeholder: '留空则与房间码相同',
               }),
-              h(
-                'div',
-                { className: 'ws-field' },
-                h('label', null, '邀请串'),
-                h(
-                  'div',
-                  { className: 'ws-field-row' },
-                  h('input', {
-                    className: 'ws-input ws-mono',
-                    type: reveal ? 'text' : 'password',
-                    readOnly: true,
-                    value: room && serverReady ? inviteOf(form.server, room, secret) : '',
-                    placeholder: '（填好地址与房间码后生成）',
-                  }),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'ws-btn',
-                      disabled: !room || !serverReady,
-                      onClick: () => void copyInvite(),
-                    },
-                    '复制',
-                  ),
-                ),
-                h('div', { className: 'ws-hint' }, '给「不填通道码、直接粘邀请」的人用；含房间码与密钥，别发到群里'),
-              ),
             )
           : null,
       )
 
       const body = () => {
         if (step === 0) {
-          const joinField =
-            entry === 'join'
-              ? h(
-                  'div',
-                  { className: 'ws-field' },
-                  h('label', null, '邀请串（可选）'),
-                  h('input', {
-                    className: 'ws-input',
-                    placeholder: 'ws://192.168.3.222:18444/ws?pair=482917，或直接填 6 位通道码',
-                    value: form.joinText,
-                    onChange: (e) => {
-                      const text = e.target.value
-                      const inv = parseInvite(text)
-                      if (inv) {
-                        patch({
-                          joinText: text,
-                          // 界面里统一显示 host:port，不把 ws://…/ws 这种写法摊给用户
-                          server: inv.server ? shortServer(inv.server) : form.server,
-                          channel: inv.channel || channel,
-                          workspace: inv.room || '',
-                          token: inv.room && inv.token !== inv.room ? inv.token : '',
-                          adopted: false,
-                        })
-                      } else {
-                        patch({ joinText: text })
-                      }
-                    },
-                  }),
-                  h(
-                    'div',
-                    { className: 'ws-hint' },
-                    room && !channelReady
-                      ? '已从这串里带出房间码；配对还要对方那 6 位通道码'
-                      : '粘整串会自动填好地址与通道码；也可以只填下面那 6 位数字',
-                  ),
-                )
-              : null
-
           return h(
             'div',
             null,
@@ -2194,7 +2155,6 @@ window.__ModuleLoader__.load({
                 '创建新同步',
               ),
             ),
-            joinField,
             serverField,
             channelField,
             pairCard,

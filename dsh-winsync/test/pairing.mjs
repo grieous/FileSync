@@ -278,15 +278,18 @@ assert.match(text(), /通道码锁定/, '通道码锁住后没说明为什么不
 assert.equal(win.localStorage.getItem('winsync.relay'), '127.0.0.1:18443', '配对成功后应当记住中继地址')
 console.log('PASS 配对通过 → 通道码置灰锁定，「下一步」放行，并记住中继地址')
 
-/* 6. 对端离开 → 回到等待，重新禁用（通道码仍然锁着，不能靠它绕过） */
+/* 6. 对端离开 → 仍然算配上过：门禁不回退（「对端连上后按钮点不了」的根因） */
 
-await applyPresence({ state: 'waiting', peer: '' })
+// 不点「重新配对」，只让轮询看到对端走了——真实情况就是这样：
+// 对端点了下一步、或它的守护断线重连，旁路房间里就没它了
+presence = { ...presence, state: 'waiting', peer: '' }
 await React.act(async () => {
-  await wait(60)
+  await wait(1700)
 })
-assert.match(text(), /正在等对方/, '对端离开后没退回等待状态')
-assert.equal(nextButton().disabled, true, '对端离开后应当重新禁用「下一步」')
-console.log('PASS 对端离开 → 退回等待并重新禁用')
+assert.match(text(), /已配对过/, '对端离开后没说明「已配对过」')
+assert.equal(nextButton().disabled, false, '配上过之后对端离开，不该再把「下一步」关回去')
+assert.equal(channelInput.disabled, true, '通道码仍应锁着，别让人改了对不上')
+console.log('PASS 配对后对端离开 → 门禁不回退，「下一步」仍可点')
 
 /* 7. 中继拒绝 → 说清是配对通道的事 */
 
@@ -348,14 +351,11 @@ assert.equal(joinStarted.announce, '', '加入端不该广播自己的配置')
 assert.equal(joinChannel.disabled, false, '还没配对时通道码不该锁')
 console.log('PASS 加入端用 6 位通道码进配对通道，且不广播配置')
 
-/* 13. 复制出来的邀请串只带地址与通道码 */
+/* 13. 「复制通道码」只复制 6 位数字（邀请串已经不进界面了） */
 
-await click(byText('.ws-btn', '复制邀请'))
-assert.ok(
-  (clipboard[clipboard.length - 1] ?? '') === 'ws://127.0.0.1:18443/ws?pair=482917',
-  `通道邀请串不对：${clipboard[clipboard.length - 1]}`,
-)
-console.log('PASS 通道邀请串 = 地址 + pair=6 位码')
+await click(byText('.ws-btn', '复制通道码'))
+assert.equal(clipboard[clipboard.length - 1], '482917', `复制到的不是 6 位通道码：${clipboard[clipboard.length - 1]}`)
+console.log('PASS 复制通道码 = 只复制 6 位数字')
 
 /* 14. 对端（创建端）的配置从见面礼里接过来 */
 
@@ -378,24 +378,23 @@ assert.ok(adoptedToken, '没从见面礼里解出密钥')
 assert.equal(byClass('input.ws-channel').disabled, true, '配对通过后通道码必须锁住')
 console.log('PASS 加入端从配对通道收到房间码与密钥，且保持密文')
 
-/* 15. 粘邀请串：通道那份带出地址与码，完整那份带出房间码 */
+/* 15. 中继地址拆成 IP 与端口两栏，整串粘进来也能自动拆 */
 
-const joinInput = inputs((n) => (n.placeholder ?? '').includes('pair='))[0]
-assert.ok(joinInput, '没找到邀请串输入框')
-await typeInto(joinInput, 'ws://10.0.0.5:19000/ws?pair=123456')
+assert.equal(inputs((n) => n.value === '127.0.0.1')[0]?.value, '127.0.0.1', 'IP 栏没带上主机')
+assert.equal(inputs((n) => n.value === '18443')[0]?.value, '18443', '端口栏没带上端口')
+assert.equal(inputs((n) => (n.placeholder ?? '').includes('pair='))[0], undefined, '邀请串输入框应当已经移除')
+console.log('PASS 中继地址分两栏，整串粘贴自动拆开，邀请串输入框已移除')
+
+/* 16. 端口只认数字，改端口后配对地址跟着变 */
+
+const portInput = inputs((n) => (n.placeholder ?? '').includes('端口'))[0]
+assert.ok(portInput, '没找到端口输入框')
+await typeInto(portInput, '19000')
 await settle()
-assert.ok(inputs((n) => n.value === '10.0.0.5:19000')[0], '粘邀请串没有带出中继地址')
-assert.equal(byClass('input.ws-channel').value, '123456', '粘邀请串没有带出通道码')
-assert.equal(started[started.length - 1].workspace, '123456', '配对通道没跟着变')
-console.log('PASS 粘通道邀请串带出地址与通道码')
-
-/* 16. 单独填 6 位数字仍然当成通道码 */
-
-await typeInto(joinInput, '654321')
-await settle()
-assert.equal(byClass('input.ws-channel').value, '654321', '单独填 6 位数字应当当成通道码')
-assert.equal(started[started.length - 1].workspace, '654321', '配对通道应当就是这 6 位')
-console.log('PASS 单独填 6 位数字即通道码')
+assert.equal(started[started.length - 1].server, 'ws://127.0.0.1:19000/ws', '改端口后配对地址没跟着变')
+await typeInto(portInput, '1a9')
+assert.equal(portInput.value, '19', '端口栏应当只收数字')
+console.log('PASS 端口栏只收数字，改端口后连接地址同步更新')
 
 /* 17. 关掉向导：守护必须停掉 */
 
@@ -409,17 +408,22 @@ assert.ok(stopCount > stopsBefore, '关向导时没停掉配对守护')
 assert.equal(sockets.length, 0, '整个流程都不该有浏览器直连中继')
 console.log('PASS 关闭向导会停掉守护，全程 0 条浏览器 WebSocket')
 
-/* 18. 中继地址记住，下次新建不用再填 */
+/* 18. 中继地址记住，下次新建时 IP 与端口两栏都带出来 */
 
 const savedRelay = win.localStorage.getItem('winsync.relay')
 assert.ok(savedRelay, '中继地址没被记住')
+const cut = savedRelay.lastIndexOf(':')
+const savedHost = cut > 0 ? savedRelay.slice(0, cut) : savedRelay
+const savedPort = cut > 0 ? savedRelay.slice(cut + 1) : ''
 await click(byText('.ws-nav-item', '创建同步任务'))
-const prefilled = document.querySelector('.ws-modal input[placeholder^="192.168"]')
-assert.ok(prefilled, '没找到中继地址输入框')
-assert.equal(prefilled.value, savedRelay, `再次新建时没带出上次的中继地址（实际「${prefilled.value}」）`)
+const prefilledHost = document.querySelector('.ws-modal input[placeholder^="192.168"]')
+assert.ok(prefilledHost, '没找到中继地址输入框')
+assert.equal(prefilledHost.value, savedHost, `再次新建时没带出上次的 IP（实际「${prefilledHost.value}」）`)
+const prefilledPort = inputs((n) => (n.placeholder ?? '').includes('端口'))[0]
+assert.equal(prefilledPort.value, savedPort, `再次新建时没带出上次的端口（实际「${prefilledPort.value}」）`)
 assert.match(text(), /上次用的中继地址/, '带出的地址没有说明来历')
 await click(byText('.ws-btn', '取消'))
-console.log('PASS 中继地址记在本机，下次新建直接带出')
+console.log('PASS 中继地址记在本机，下次新建 IP 与端口都带出')
 
 /* 19. 记的只是地址：房间码、密钥、通道码都不落盘 */
 
