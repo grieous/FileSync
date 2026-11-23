@@ -6,6 +6,7 @@ description = "WinSync 的无界面守护进程：给 dsh 插件提供 HTTP + SS
 
 [dependencies]
 sync-client.workspace = true
+sync-proto.workspace = true
 sync-core.workspace = true
 anyhow.workspace = true
 serde.workspace = true

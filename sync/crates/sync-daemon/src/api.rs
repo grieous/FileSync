@@ -4,7 +4,7 @@
 //! code 取值固定为 `not-ready` / `root-conflict` / `root-changed` / `bad-request` /
 //! `unauthorized` / `internal`。
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -13,8 +13,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use sync_client::{Config, SyncMode};
+use sync_proto::{Frame as WireFrame, Msg, PROTO_VER};
 use sync_core::{Activity, Filter};
 
 use crate::engine;
@@ -107,6 +109,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/open-dir", post(open_dir))
         .route("/api/fs/list", get(fs_list))
         .route("/api/probe", post(probe))
+        .route("/api/presence", get(presence_status).post(presence_start))
+        .route("/api/presence/stop", post(presence_stop))
         .route("/api/events", get(events_handler))
         .route("/api/shutdown", post(shutdown))
         .route_layer(middleware::from_fn_with_state(
@@ -963,3 +967,218 @@ async fn probe(Json(body): Json<ProbeInput>) -> ApiResult {
     Ok(Json(json!({ "ok": true, "server": cfg.server, "result": result })))
 }
 
+/* ------------------------------------------------------------------ 配对守护 */
+
+/// 「配对」要看得见、等得到，才算流程。
+///
+/// 早先两版都栽在同一件事上：浏览器直连中继（被 dsh 页面的 CSP / 混合内容掐掉），
+/// 以及「两端必须同时在线」的死结。现在改成：向导第一步让**守护进程**挂一条常驻连接，
+/// 进的是旁路房间 `<房间码>::pair`——中继按房间名配对，后缀不同就是另一间房，所以
+///   - 不占真房间的两个位置，不会把对方的 daemon 挤掉或当成同步对端；
+///   - 两端向导都挂着同一个房间码时，中继各自推 `PeerStatus{peer_online:true}`，
+///     界面据此变成「配对已通过」；对方一走就回退成「等待对方」。
+/// 连接断了会自动重连（1.2 秒），中继 180 秒空闲超时也只是重连一次。
+#[derive(Default)]
+struct PresenceSlot {
+    /// idle | connecting | waiting | paired | denied | unreachable
+    state: &'static str,
+    peer: String,
+    error: String,
+    room: String,
+    since: u64,
+    gen: u64,
+    abort: Option<tokio::task::AbortHandle>,
+}
+
+fn presence_slot() -> &'static StdMutex<PresenceSlot> {
+    static SLOT: OnceLock<StdMutex<PresenceSlot>> = OnceLock::new();
+    SLOT.get_or_init(Default::default)
+}
+
+fn presence_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn presence_view() -> Value {
+    match presence_slot().lock() {
+        Ok(s) => json!({
+            "state": s.state,
+            "peer": s.peer,
+            "error": s.error,
+            "room": s.room,
+            "since": s.since,
+        }),
+        Err(_) => json!({ "state": "error", "peer": "", "error": "内部状态不可用", "room": "", "since": 0 }),
+    }
+}
+
+/// 只在「还是同一次配对」时才写状态：用户换了地址会重启一个 gen，旧任务写不进来。
+fn presence_set(gen: u64, f: impl FnOnce(&mut PresenceSlot)) {
+    if let Ok(mut slot) = presence_slot().lock() {
+        if slot.gen == gen {
+            f(&mut slot);
+        }
+    }
+}
+
+fn presence_alive(gen: u64) -> bool {
+    match presence_slot().lock() {
+        Ok(slot) => slot.gen == gen,
+        Err(_) => false,
+    }
+}
+
+async fn presence_loop(gen: u64, url: String, room: String, server: String, device: String) {
+    let side_room = format!("{room}::pair");
+    loop {
+        if !presence_alive(gen) {
+            return;
+        }
+        presence_set(gen, |s| {
+            s.state = "connecting";
+            s.error.clear();
+        });
+
+        match tokio_tungstenite::connect_async(url.as_str()).await {
+            Err(err) => {
+                let denied = matches!(
+                    &err,
+                    tokio_tungstenite::tungstenite::Error::Http(resp) if resp.status() == 401
+                );
+                presence_set(gen, |s| {
+                    s.state = if denied { "denied" } else { "unreachable" };
+                    s.peer.clear();
+                    s.error = if denied {
+                        "中继拒绝了这组密钥：房间码或密钥与中继配置不一致".to_string()
+                    } else {
+                        format!("连不上 {server}：{err}")
+                    };
+                });
+                // 密钥错了重试也没用，慢一点等用户改；网络问题就快些重试
+                let wait = if denied { 5000 } else { 2000 };
+                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                continue;
+            }
+            Ok((mut socket, _)) => {
+                let hello = WireFrame::Control(Msg::Hello {
+                    device_id: device.clone(),
+                    workspace_id: side_room.clone(),
+                    proto_ver: PROTO_VER,
+                });
+                if socket
+                    .send(tokio_tungstenite::tungstenite::Message::Binary(hello.encode()))
+                    .await
+                    .is_err()
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                    continue;
+                }
+                presence_set(gen, |s| {
+                    s.state = "waiting";
+                    s.peer.clear();
+                    s.error.clear();
+                });
+
+                while let Some(msg) = socket.next().await {
+                    if !presence_alive(gen) {
+                        return;
+                    }
+                    match msg {
+                        Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) => {
+                            if let Ok(WireFrame::Control(Msg::PeerStatus {
+                                peer_online,
+                                peer_device_id,
+                            })) = WireFrame::decode(&data)
+                            {
+                                presence_set(gen, |s| {
+                                    s.state = if peer_online { "paired" } else { "waiting" };
+                                    s.peer = if peer_online {
+                                        peer_device_id.unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    };
+                                    if peer_online {
+                                        s.error.clear();
+                                    }
+                                });
+                            }
+                        }
+                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+
+                // 掉线：从「已配对」退回「等待」，然后重连
+                presence_set(gen, |s| {
+                    if s.state == "paired" {
+                        s.state = "waiting";
+                        s.peer.clear();
+                    }
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            }
+        }
+    }
+}
+
+async fn presence_status() -> ApiResult {
+    Ok(Json(json!({ "ok": true, "presence": presence_view() })))
+}
+
+async fn presence_start(Json(body): Json<ProbeInput>) -> ApiResult {
+    let server = normalize_probe_server(&body.server);
+    let room = body.workspace.trim().to_string();
+    if server.is_empty() || room.is_empty() {
+        return Err(ApiError::bad("服务器地址和房间码都要填"));
+    }
+    let presented = body.token.trim();
+    let token = if presented.is_empty() {
+        room.clone()
+    } else {
+        presented.to_string()
+    };
+    // 每次配对换一个 device id：中继遇到同 id 会踢掉旧连接，换掉才不会误伤上一次的
+    let device = format!("ui-{}", uuid::Uuid::new_v4().simple());
+    let cfg = Config {
+        server: server.clone(),
+        token,
+        workspace: format!("{room}::pair"),
+        ..Default::default()
+    };
+    let url = cfg.url();
+
+    let mut slot = presence_slot().lock().map_err(|_| lock_err())?;
+    if let Some(abort) = slot.abort.take() {
+        abort.abort();
+    }
+    slot.gen += 1;
+    let gen = slot.gen;
+    slot.state = "connecting";
+    slot.peer.clear();
+    slot.error.clear();
+    slot.room = room.clone();
+    slot.since = presence_now();
+    let handle = tokio::spawn(presence_loop(gen, url, room, server, device));
+    slot.abort = Some(handle.abort_handle());
+    drop(slot);
+
+    Ok(Json(json!({ "ok": true, "presence": presence_view() })))
+}
+
+async fn presence_stop() -> ApiResult {
+    if let Ok(mut slot) = presence_slot().lock() {
+        if let Some(abort) = slot.abort.take() {
+            abort.abort();
+        }
+        slot.gen += 1;
+        slot.state = "idle";
+        slot.peer.clear();
+        slot.error.clear();
+        slot.room.clear();
+    }
+    Ok(Json(json!({ "ok": true })))
+}

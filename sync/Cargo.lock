@@ -3624,6 +3624,7 @@ dependencies = [
  "serde_json",
  "sync-client",
  "sync-core",
+ "sync-proto",
  "tokio",
  "tokio-tungstenite",
  "tracing",

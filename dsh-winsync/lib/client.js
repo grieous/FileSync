@@ -205,7 +205,7 @@ window.__ModuleLoader__.load({
   border-bottom:1px solid var(--ws-line);font-size:12px;color:var(--ws-dim)}
 .ws-raw-body{overflow:auto;padding:8px 12px;font-family:ui-monospace,Consolas,monospace;
   font-size:11.5px;line-height:1.65;color:var(--ws-dim);white-space:pre-wrap;word-break:break-all}
-.ws-link{color:#5B92FF;cursor:pointer;background:none;border:0;font:inherit;padding:0}
+.ws-link{color:var(--ws-accent);cursor:pointer;background:none;border:0;font:inherit;padding:0}
 /* 开关：比原生复选框更像「设置项」，也和卡片里的圆钮风格统一 */
 .ws-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;color:var(--ws-dim);font-size:12px}
 .ws-switch input{appearance:none;-webkit-appearance:none;width:32px;height:18px;border-radius:9px;
@@ -398,17 +398,30 @@ window.__ModuleLoader__.load({
       if (!base) return tail
       return tail ? `${base}\\${tail}` : base
     }
+    /**
+     * 「对端还没上线」不是失败：任务刚建好、对方还没加进来时，同步必然先等一轮再超时重试。
+     * 这属于正常等待，标成红色的「同步失败」会让人以为配对/配置错了。
+     */
+    function waitingPeer(message) {
+      return /等待对端|对端暂未上线|对方可能没有运行|peer/i.test(String(message ?? ''))
+    }
+
     function statusOf(task) {
       const rt = task.runtime ?? {}
       // running 与 last_error 会同时存在（上一轮失败、这一轮还在等对端），
       // 这时说「同步中」会让人以为错误已经好了，所以单独标成「重试中」。
       if (rt.running) {
+        if (waitingPeer(rt.last_error)) return { text: '等待对端上线…', tone: '#E6A23C' }
         return rt.last_error
           ? { text: '重试中…', tone: '#E6A23C' }
           : { text: '同步中…', tone: '#E6A23C' }
       }
       if (task.paused) return { text: '已暂停', tone: '#6E7176' }
-      if (rt.last_error) return { text: '同步失败', tone: '#F0554D' }
+      if (rt.last_error) {
+        return waitingPeer(rt.last_error)
+          ? { text: '等待对端上线', tone: '#E6A23C' }
+          : { text: '同步失败', tone: '#F0554D' }
+      }
       if (rt.last) return { text: rt.last.up_to_date ? '两端已一致' : '同步完成', tone: '#4CC38A' }
       return { text: '等待同步', tone: '#6E7176' }
     }
@@ -738,9 +751,14 @@ window.__ModuleLoader__.load({
         rt.last_error
           ? h(
               'div',
-              { className: 'ws-issues' },
-              // 正在同步或已暂停时，这条是「上一轮」的结果；否则状态行已经说了「同步失败」
-              rt.running || task.paused ? `上次失败：${rt.last_error}` : rt.last_error,
+              { className: 'ws-issues', title: rt.last_error },
+              // 等对端是正常状态（对方还没加入），不该按「失败」的措辞显示
+              waitingPeer(rt.last_error)
+                ? '等待对端上线：对方还没用同一条邀请串建任务，或那边的 dsh 没在运行'
+                : // 正在同步或已暂停时，这条是「上一轮」的结果；否则状态行已经说了「同步失败」
+                  rt.running || task.paused
+                  ? `上次失败：${rt.last_error}`
+                  : rt.last_error,
             )
           : null,
       )
@@ -1426,10 +1444,12 @@ window.__ModuleLoader__.load({
       const [step, setStep] = React.useState(0)
       const [busy, setBusy] = React.useState(false)
       const [entry, setEntry] = React.useState('create')
-      // 自检结果：idle / testing / accepted / denied / unreachable / timeout / bad-url / error
-      const [probe, setProbe] = React.useState({ state: 'idle', detail: '', at: 0 })
-      // 手动「重新测试」的计数器：只用来重跑一次，不改配置
-      const [probeNonce, setProbeNonce] = React.useState(0)
+      // 配对状态：idle / connecting / waiting / paired / denied / unreachable / error
+      const [pair, setPair] = React.useState({ state: 'idle', peer: '', error: '', room: '' })
+      // 手动「重新配对」的计数器：只用来重开一次，不改配置
+      const [pairNonce, setPairNonce] = React.useState(0)
+      // 对方已经建好任务、只是暂时不在等待房间里：点「先建我这边」才放行
+      const [skipPair, setSkipPair] = React.useState(false)
       const [form, setForm] = React.useState({
         server: '',
         // 默认就生成一个随机房间码：不用再想名字，也不用去中继登记
@@ -1460,73 +1480,105 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 连接自检交给 daemon 做，不在浏览器里开 WebSocket。
+       * 配对 = 两端在同一个房间里互相看见，连接由 daemon 代连。
        *
-       * 原因有两个，都是实测出来的：
-       *   1. 面板跑在 dsh 的页面里，CSP 与混合内容（https 页面连 ws://）会直接掐掉
-       *      到中继的连接，而同一台机器上的 daemon 连得好好的——用户看到的就是
-       *      「配对永远连不上」，怎么点都没用；
-       *   2. 中继的密钥校验在握手阶段完成（`?workspace=&token=` 不对就 401），
-       *      所以「握手成功」就等于「地址、端口、房间码、密钥四样都对」，
-       *      而这恰好是用户唯一会填错的部分。
+       * 为什么不在浏览器里连：面板跑在 dsh 页面里，CSP 与混合内容（https 页面连 ws://）
+       * 会直接掐掉到中继的 WebSocket——旧版「永远连不上、永远等不到对端」就是这么来的。
+       * 同一台机器上的 daemon 连得没问题，所以这一步交给它。
        *
-       * 只握手、不发 Hello：占房间位置会让对端 daemon 白等一轮，没必要。
+       * 为什么进 `<房间码>::pair`：中继按房间名配对、一间只容 2 端。直接挤进真房间会和
+       * 正在同步的 daemon 抢位，还可能被对方当成同步对端白等一轮；旁路房间里只有两端的
+       * 向导，配对看得见，也不打扰真正的同步。
        */
       React.useEffect(() => {
         if (step !== 0 || busy) return undefined
         const url = normalizeServer(form.server)
         const code = form.workspace.trim()
         if (!/^wss?:\/\/[^\s/]+/.test(url) || !code) {
-          setProbe({ state: 'idle', detail: '', at: 0 })
+          setPair({ state: 'idle', peer: '', error: '', room: '' })
           return undefined
         }
         let alive = true
-        setProbe({ state: 'testing', detail: '', at: 0 })
-        // 房间码是一个字一个字敲的，等停顿再发，别把中继的每分钟配额刷爆
+        // 房间码是一个字一个字敲的，等停顿再开，别让中继的每分钟配额白烧
         const timer = setTimeout(async () => {
           try {
-            const body = await api('/probe', {
+            const body = await api('/presence', {
               method: 'POST',
               body: { server: url, workspace: code, token: form.token.trim() || code },
             })
-            if (!alive) return
-            const result = body?.result ?? {}
-            setProbe({ state: result.state ?? 'error', detail: result.message ?? '', at: Date.now() })
+            if (alive && body?.presence) setPair(body.presence)
           } catch (e) {
-            if (alive) setProbe({ state: 'error', detail: e.message, at: Date.now() })
+            if (alive) setPair({ state: 'error', peer: '', error: e.message, room: code })
           }
-        }, 600)
+        }, 500)
         return () => {
           alive = false
           clearTimeout(timer)
+          // 离开第一步就退出等待房间：别让位置一直占着
+          void api('/presence/stop', { method: 'POST' }).catch(() => {})
         }
-      }, [step, busy, form.server, form.workspace, form.token, probeNonce])
+      }, [step, busy, form.server, form.workspace, form.token, pairNonce])
 
-      const probeTitle = () => {
-        if (probe.state === 'testing') return '正在自检…'
-        if (probe.state === 'accepted') return '中继已接受这组配置'
-        if (probe.state === 'denied') return '中继拒绝了密钥'
-        if (probe.state === 'unreachable') return '连不上中继'
-        if (probe.state === 'timeout') return '连接超时'
-        if (probe.state === 'bad-url') return '服务器地址无效'
-        if (probe.state === 'error') return '自检没跑起来'
-        return '尚未自检'
+      // 守护进程会自己重连、自己更新状态，这里只负责把最新状态取回来。
+      // 地址/房间码还没填全时不轮询：否则会把上一次残留的「已配对」当成真的。
+      React.useEffect(() => {
+        if (step !== 0 || busy) return undefined
+        const url = normalizeServer(form.server)
+        const code = form.workspace.trim()
+        if (!/^wss?:\/\/[^\s/]+/.test(url) || !code) return undefined
+        let alive = true
+        const tick = async () => {
+          try {
+            const body = await api('/presence')
+            // 守护进程里可能还留着上一组配置的结论，房间对不上就不认
+            if (alive && body?.presence && (!body.presence.room || body.presence.room === code)) {
+              setPair(body.presence)
+            }
+          } catch {
+            /* 一次取不到不算失败，下一次再试 */
+          }
+        }
+        void tick()
+        const timer = setInterval(tick, 1500)
+        return () => {
+          alive = false
+          clearInterval(timer)
+        }
+      }, [step, busy, form.server, form.workspace, form.token])
+
+      const paired = pair.state === 'paired'
+      // 这三种是「配置被证伪」，必须拦住并让人去改
+      const pairBroken =
+        pair.state === 'denied' || pair.state === 'unreachable' || pair.state === 'error'
+
+      const pairTitle = () => {
+        if (pair.state === 'paired') return '配对已通过'
+        if (pair.state === 'waiting') return '已连上中继，正在等对方'
+        if (pair.state === 'connecting') return '正在连接中继…'
+        if (pair.state === 'denied') return '中继拒绝了密钥'
+        if (pair.state === 'unreachable') return '连不上中继'
+        if (pair.state === 'error') return '配对没跑起来'
+        return '还没开始配对'
       }
 
-      const probeHint = () => {
-        if (probe.state === 'accepted') {
-          return '地址、房间码、密钥都对。把邀请串发给对方，对方用它建任务后两端就会开始同步；这里不需要等对方在线。'
+      const pairHint = () => {
+        if (pair.state === 'paired') {
+          const who = pair.peer ? `（对端 ${String(pair.peer).slice(0, 8)}）` : ''
+          return `两端已经在中继里互相看见${who}，配对成功，可以继续设置目录；建好任务后会自动开始同步。`
         }
-        if (probe.state === 'denied') {
-          return '房间码或密钥与中继配置不一致。中继没配房间密钥时，密钥就等于房间码——所以这里留空即可。'
+        if (pair.state === 'waiting') {
+          return '这个房间现在只有你一端。让对方打开「文件同步 → 创建同步任务 → 加入已有同步」，'
+            + '粘上面那条邀请串（或手填同一个房间码），这边会自动变成「配对已通过」。'
         }
-        if (probe.state === 'unreachable' || probe.state === 'timeout') {
-          return `${probe.detail || '检查 IP 与端口'}。端口不是 18443 就写全，例如 192.168.3.222:18443。`
+        if (pair.state === 'connecting') return '后台服务正在连中继，一两秒后会有结果。'
+        if (pair.state === 'denied') {
+          return '房间码或密钥与中继配置不一致。中继没配房间密钥时，密钥就等于房间码，这里留空即可。'
         }
-        if (probe.state === 'error') {
-          return `同步服务可能还没起来：${probe.detail || '重启 dsh 再试'}`
+        if (pair.state === 'unreachable') {
+          return `${pair.error || '检查 IP 与端口'}。端口不是默认值就写全，例如 192.168.3.222:18443。`
         }
-        return '填好服务器与房间码会自动自检；自检只验证配置，不需要对方同时在线。'
+        if (pair.state === 'error') return `后台服务没响应：${pair.error || '重启 dsh 再试'}`
+        return '填好中继地址与房间码会自动开始配对；两端都进同一个房间才算配对成功。'
       }
 
       const issues = []
@@ -1539,13 +1591,10 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 只有「已经证明这组配置连不上」才拦人：没自检过、或自检通过都放行。
-      // 以前要求「对端必须在线」才给下一步，等于逼两台机器同时开着窗口，谁先建谁卡住。
-      const blocked =
-        probe.state === 'denied' ||
-        probe.state === 'unreachable' ||
-        probe.state === 'timeout' ||
-        probe.state === 'bad-url'
+      // 第一步必须先配对成功才能往下走（这是明确的产品要求）。
+      // 唯一例外：对方已经建好任务、只是暂时不在等待房间里——那种情况给一个显式的
+      // 「先建我这边」出口，否则先建的人会被永远锁在第一步。
+      const pairingDone = paired || skipPair
 
       const create = async () => {
         setBusy(true)
@@ -1573,7 +1622,7 @@ window.__ModuleLoader__.load({
                   },
                 },
               }),
-            '任务已创建',
+            '任务已创建，把邀请串发给对方就能开始同步',
           )
           onClose()
         } catch {
@@ -1656,7 +1705,7 @@ window.__ModuleLoader__.load({
         ),
       )
 
-      const probeCard = h(
+      const pairCard = h(
         'div',
         { className: 'ws-card', style: { marginTop: 12 } },
         h(
@@ -1669,23 +1718,50 @@ window.__ModuleLoader__.load({
               'div',
               {
                 className: 'ws-pair-title',
-                'data-presence': probe.state === 'accepted' ? 'ok' : blocked ? 'bad' : 'idle',
+                'data-presence': paired ? 'ok' : pairBroken ? 'bad' : 'idle',
               },
-              probe.state === 'accepted' ? `✓ ${probeTitle()}` : blocked ? `✗ ${probeTitle()}` : probeTitle(),
+              paired
+                ? `✓ ${pairTitle()}`
+                : pairBroken
+                  ? `✗ ${pairTitle()}`
+                  : pair.state === 'waiting' || pair.state === 'connecting'
+                    ? `⏳ ${pairTitle()}`
+                    : pairTitle(),
             ),
-            h('div', { className: 'ws-hint' }, probeHint()),
+            h('div', { className: 'ws-hint' }, pairHint()),
+            !paired && !pairBroken
+              ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'ws-link',
+                    style: { marginTop: 6 },
+                    onClick: () => {
+                      setSkipPair(true)
+                      store.notify('已允许先建任务：对方用同一条邀请串加入后会自动同步', 'warn')
+                    },
+                  },
+                  '对方已经建好任务了？先建我这边，稍后自动连上 ›',
+                )
+              : null,
+            skipPair && !paired
+              ? h('div', { className: 'ws-hint' }, '已跳过配对等待：建好后把邀请串给对方，对方加入时两端会自动握手。')
+              : null,
           ),
           h(
             'button',
             {
               type: 'button',
               className: 'ws-btn',
-              // 卡片行里空间紧，「重新自检」会被挤成两行
+              // 卡片行里空间紧，按钮文字会被挤成两行
               style: { whiteSpace: 'nowrap', flexShrink: 0 },
-              disabled: probe.state === 'testing',
-              onClick: () => setProbeNonce((n) => n + 1),
+              disabled: pair.state === 'connecting',
+              onClick: () => {
+                setSkipPair(false)
+                setPairNonce((n) => n + 1)
+              },
             },
-            probe.state === 'testing' ? '自检中…' : '重新自检',
+            '重新配对',
           ),
         ),
       )
@@ -1773,7 +1849,7 @@ window.__ModuleLoader__.load({
                   tokenField,
                 )
               : h('div', null, serverField, roomField, tokenField, inviteCard),
-            probeCard,
+            pairCard,
           )
         }
         if (step === 1) {
@@ -1860,7 +1936,11 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'ws-sub', style: { marginTop: 4 } },
-              probe.state === 'accepted' ? '中继自检通过' : '未自检（不影响创建，同步失败时日志会说明原因）',
+              paired
+                ? '已配对（对端在线）'
+                : skipPair
+                  ? '对方稍后加入（已跳过配对等待）'
+                  : '未配对',
             ),
             issues.length > 0
               ? h(
@@ -1897,16 +1977,20 @@ window.__ModuleLoader__.load({
                   'button',
                   {
                     className: 'ws-btn ws-btn-primary',
-                    disabled: issues.length > 0 || blocked,
+                    // 第一步必须配对成功（或明确点了「先建我这边」）才放行
+                    disabled:
+                      issues.length > 0 || (step === 0 && !pairingDone),
                     title:
                       issues.length > 0
                         ? issues.join('；')
-                        : blocked
-                          ? probeHint()
+                        : step === 0 && !pairingDone
+                          ? pairBroken
+                            ? pairHint()
+                            : '先完成配对：等对方进入同一个房间，这里会自动通过'
                           : '',
                     onClick: () => setStep(step + 1),
                   },
-                  '下一步',
+                  step === 0 && !pairingDone ? '下一步（待配对）' : '下一步',
                 )
               : h(
                   'button',

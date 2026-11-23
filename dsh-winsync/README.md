@@ -113,14 +113,15 @@ dsh plugin --profile desktop install --force
 - **配对只有一个东西要交换：邀请串**。它长这样
   `ws://192.168.3.222:18443/ws?workspace=<房间码>&token=<密钥>`，与 daemon 真正连的地址同构，
   复制出去就是一份可用配置。「加入已有同步」粘进去，地址、房间码、密钥三项一次填好。
-- **不做「等对端」**：以前向导要求两端同时挂在同一个房间里才算配对成功，谁先建任务谁就
-  不在房间里，另一端永远等不到人。现在配对 = **自检配置**，不要求对方在线。
-- **自检由 daemon 做，不在浏览器里连中继**：面板跑在 dsh 页面里，CSP 与混合内容
-  （https 页面连 `ws://`）会把浏览器的 WebSocket 掐掉，而同一台机器的 daemon 连得好好的——
-  这正是旧版「配对永远连不上」的根因。自检只做一次握手（中继的密钥校验就在握手阶段），
-  不发 Hello、不占房间位置，因此也不会把对方的 daemon 误当同步对端。
-  握手通过 = 地址、端口、房间码、密钥四样都对；401 明确报「密钥不对」，
-  连不上时报「检查 IP 与端口」。只有被证伪的配置才拦住「下一步」，没自检过也放行。
+- **第一步必须先配对成功才能往下走**。配对由 daemon 长期驻守完成（浏览器不连中继：
+  面板跑在 dsh 页面里，CSP 与混合内容会把 `ws://` 掐掉，旧版「配对永远连不上」就是这个原因）。
+  守护连接进的是旁路房间 `<房间码>::pair`：中继按房间名配对、一间只容 2 端，直接挤进真房间
+  会和正在同步的 daemon 抢位，还可能被对方当成同步对端白等一轮。
+  - 两端向导都挂着同一个房间码 → 中继各推一条 `PeerStatus`，界面变「✓ 配对已通过」并放行；
+  - 只有一端 → 显示「⏳ 已连上中继，正在等对方」，「下一步」保持禁用；
+  - 密钥不对 / 连不上 → 明确报错并禁用；对端一离开就退回等待、重新禁用。
+  - 唯一出口：「对方已经建好任务了？先建我这边」——先建的人不会被永远锁在第一步，
+    但要显式点一下，并会提示「已跳过配对等待」。
 - **房间码与密钥**：新建任务自动生成 32 位随机房间码（不用起名字、不用去中继登记），
   默认密钥就是房间码；中继启动时若配了 `SYNC_ROOM_TOKENS`，才需要把「密钥」填成那一把。
   6 位配对码属于旧版遗留：仍能被识别（展开成 `pair-xxxxxx` 房间），但只有 100 万种可能，
@@ -203,9 +204,10 @@ npm run pack
 | 覆盖安装报 `ERR_PNPM_EPERM … dsh-winsync_tmp_<pid>_<n>\bin` | daemon 是不是正在从 `node_modules\dsh-winsync\bin` 里跑（`Get-Process winsync-daemon`），或杀软在拦 `node_modules` 里的 exe | 0.5.2 起运行点是 `<state>\bin`，新装不会再犯。从 0.5.1 及更早升级的这一次先退 dsh、`Stop-Process -Name winsync-daemon -Force`、删掉旧 `node_modules\dsh-winsync`（含 `dsh-winsync_tmp_*`）再装 |
 | 左侧栏没有「同步」 | `dsh plugin --profile <p> list` 里有没有 `dsh-winsync`；浏览器 console 有没有模块加载错误 | 少东西就重装：删 `~/.dsh/profiles/<p>/node_modules/dsh-winsync` 再 `dsh plugin --profile <p> install --force` |
 | 面板打开是「同步服务不可用」 | 面板「设置 → 诊断」里的 `daemon` 段；`%LOCALAPPDATA%\dsh-winsync\daemon.json` 是否存在 | 点「重试」；仍失败就看 daemon 日志（`<state>\logs\`） |
-| 第一步自检报「中继拒绝了密钥」 | 中继启动时有没有配 `SYNC_ROOM_TOKENS`；配了的话「密钥」必须是那一把，没配就留空（等于房间码） | 两边填同一组「房间码 + 密钥」；改完会自动重跑自检，也可以点「重新自检」 |
-| 第一步自检报「连不上中继」 | 地址是不是只写了 IP、端口被补成默认 8443 | 写成 `192.168.3.222:18443` 这种带端口的；自检由 daemon 发起，能排除浏览器 CSP / 混合内容的影响 |
-| 自检通过但同步报错 | 对方是不是还没建任务，或两端房间码/密钥不一致 | 自检只证明「本机配置被中继接受」，不代表对端在线；看任务卡的状态行与日志，那才是同步的真实结果 |
+| 第一步一直「正在等对方」 | 对方还没打开向导，或填的不是同一个房间码 | 把邀请串发给他，让他选「加入已有同步」粘进去；两端都进同一房间后这边自动通过 |
+| 第一步报「中继拒绝了密钥」 | 中继启动时有没有配 `SYNC_ROOM_TOKENS`；配了的话「密钥」必须是那一把，没配就留空（等于房间码） | 两边填同一组「房间码 + 密钥」；改完会自动重连 |
+| 第一步报「连不上中继」 | 地址是不是只写了 IP、端口被补成默认 8443 | 写成 `192.168.3.222:18443` 这种带端口的；配对由 daemon 发起，能排除浏览器 CSP / 混合内容的影响 |
+| 任务卡一直是「等待对端上线」 | 对方还没建任务，或那边的 dsh 没在运行 | 这是正常等待，不是失败；对方加入后状态会变成「同步中」→「两端已一致」 |
 | 提示 `daemon-missing` | 诊断里的 `daemon.seed`、包内 `bin\winsync-daemon.exe.gz`、`<state>\bin\`、`Program Files\WinSync\`、`PATH` | `cargo build -p sync-daemon --release` 后把 exe 放进 `<state>\bin\`，或重新 `npm run pack` 打一个自带种子的包，或在设置里填绝对路径 |
 | 诊断里 `daemon.seed.error` 是 `EBUSY`/`EPERM` | 状态目录里的旧 exe 正在跑，种子换不上去 | 正常（沿用旧副本）；要让新 exe 生效就退 dsh 再启动一次 |
 | 改了界面却不生效 | **先看侧栏底部的版本角标**：版本与 commit 是不是你以为的那一版 | 客户端 bundle 在页面加载时注入，**必须重启 dsh**；重装前记得删旧的 `node_modules/dsh-winsync`（pnpm 会硬链旧快照） |
@@ -224,7 +226,7 @@ node test/p2-smoke.mjs       # 宿主：路由、代理、CRUD 透传、SSE、�
 node test/seed-binary.mjs    # 包内种子展开：字节一致、幂等、换种子重展开、坏种子不致命
 node test/version.mjs        # /version：不依赖 daemon、版本与 package.json 一致、commit 形状合法
 node test/version-ui.mjs     # 版本角标（需 react/jsdom）：显示、复制、接口挂了不拖垮面板
-node test/pairing.mjs        # 配对（需 react/jsdom）：自动自检、401/连不上拦截、粘邀请串带出密钥、旧配对码兼容
+node test/pairing.mjs        # 配对（需 react/jsdom）：等对端门禁、配对通过放行、401/连不上拦截、跳过出口、粘邀请串、旧配对码兼容
 node test/cdp-inspect.mjs <url> [port] [--aria=同步]   # 真实页面里的渲染与截图
 
 # 同步本体（双端、安全阀、限速、与 exe 的隔离）在仓库根的 sync/tools/
