@@ -12,6 +12,8 @@
 
 import http from 'node:http'
 
+import { pluginInfo, pluginLabel } from './version.js'
+
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PATCH', 'DELETE'])
 const MAX_BODY_BYTES = 256 * 1024
 
@@ -69,12 +71,20 @@ export function createApiHandler(manager) {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const route = url.pathname.replace(/^\/winsync\/api/, '') || '/'
 
+    // 这一版是谁：不碰 daemon，daemon 起不来时界面也能显示版本（最常见的排查入口）
+    if (route === '/version') {
+      writeJson(res, 200, { ok: true, plugin: 'dsh-winsync', label: pluginLabel, ...pluginInfo })
+      return
+    }
+
     // 诊断用：不碰 daemon 也能回答「插件装没装上、状态目录在哪」
     if (route === '/ping') {
       writeJson(res, 200, {
         ok: true,
         plugin: 'dsh-winsync',
         api: '/winsync/api',
+        version: pluginInfo.version,
+        commit: pluginInfo.commit,
         runtimeDir: manager.dir,
         daemon: manager.snapshot(),
       })
@@ -93,6 +103,8 @@ export function createApiHandler(manager) {
       writeJson(res, 200, {
         ok: true,
         plugin: 'dsh-winsync',
+        version: pluginInfo.version,
+        commit: pluginInfo.commit,
         runtimeDir: manager.dir,
         prefsPath: manager.snapshot().prefsPath,
         handshake: redactHandshake(manager.peekHandshake()),

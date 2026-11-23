@@ -95,6 +95,7 @@ dsh plugin --profile desktop install --force
 | 设置 | 开机自启、上下行限速、记录保留（天数/条数）、立即清理、诊断、保存 |
 | 弹窗 | 创建向导（三步 + 预检）、任务设置（改目录要二次确认） |
 | 浮层 | 原始日志（最近 400 行，贴底滚动） |
+| 侧栏底部 | 版本角标 `v0.5.3 · c76a83c`，点击复制完整版本信息 |
 
 响应式用容器查询，因为面板宽度取决于 dsh 的分栏而不是视口：> 820px 三列，≤ 820px 两列，
 ≤ 640px 单列且侧栏收窄到 132px。
@@ -118,6 +119,9 @@ dsh plugin --profile desktop install --force
   想给更多人用不用动中继配置。
 - **同步目录不存在会自动创建**（新建任务、保存修改时都会），不用先去资源管理器建目录。
   启动同步时故意**不**自动建：盘符没挂上时把空目录当真，会把「本地全没了」传给对端。
+- **侧栏底部常驻版本角标**（`v0.5.3 · c76a83c`）。`/version` 不碰 daemon，所以同步服务起不来时
+  它照样显示——「装了新版界面却没变」这类问题，先看角标上的版本与提交，再决定要不要查安装。
+  工作区有未提交改动时角标标成 `+dirty` 并变色，点一下复制版本、提交、分支、打包时间与目录。
 
 **与 exe 的差异**：浏览器拿不到系统的目录选择框（`<input type="file" webkitdirectory>` 只给相对路径），
 所以创建向导第二步是**粘贴绝对路径**，hint 里写明了原因。
@@ -132,9 +136,14 @@ npm run pack
 
 版本号按 patch 递增；安装到别的机器用 `dsh plugin --profile <名> add <tgz 路径>`。
 
-打包脚本会做三件额外的事：把 `bin/winsync-daemon.exe` 压成 `bin/winsync-daemon.exe.gz` 放进包
-（tgz 约 2.8 MB）、**解压回读校验 sha256**、并**拒绝任何裸 exe 进包**——裸 exe 就是
-`ERR_PNPM_EPERM` 的来源，缺文件或体积异常也直接失败，不会产出一个装完才发现少东西的包。
+打包脚本会做四件额外的事：把 `bin/winsync-daemon.exe` 压成 `bin/winsync-daemon.exe.gz` 放进包
+（tgz 约 2.8 MB）、**解压回读校验 sha256**、**拒绝任何裸 exe 进包**——裸 exe 就是
+`ERR_PNPM_EPERM` 的来源，缺文件或体积异常也直接失败，不会产出一个装完才发现少东西的包；
+最后把 `gitCommit` / `gitBranch` / `gitDirty` / `builtAt` 写进包里的 `package.json`，
+面板的版本角标就靠这几个字段（用户机器上没有 `.git`，只能打包时定死）。
+
+**正式发布请先提交源码再打包**，否则包内 `gitDirty=true`，装出来的角标永远带 `+dirty`；
+打完再把 `dist/` 单独提交。
 
 如果偏好里设了 `binPath` 或环境变量 `WINSYNC_DAEMON_BIN`，会优先用那些。
 
@@ -156,7 +165,8 @@ npm run pack
 
 | 路径 | 说明 |
 |---|---|
-| `GET /ping` | 插件自检：状态目录、daemon 快照；不含 token |
+| `GET /version` | 插件自述：`version` / `commit` / `commitSource` / `branch` / `dirty` / `builtAt` / `dir`。**不碰 daemon**，所以同步服务起不来时也能回答「装的是哪一版」 |
+| `GET /ping` | 插件自检：状态目录、daemon 快照、版本与 commit；不含 token |
 | `GET /diag` | 拉起 daemon 并回 `health`；握手里的 token 只给指纹与长度 |
 | `* /tasks` `* /state` `* /events` … | 原样代理到 daemon，Bearer 在服务端注入 |
 
@@ -184,7 +194,8 @@ npm run pack
 | 面板打开是「同步服务不可用」 | 面板「设置 → 诊断」里的 `daemon` 段；`%LOCALAPPDATA%\dsh-winsync\daemon.json` 是否存在 | 点「重试」；仍失败就看 daemon 日志（`<state>\logs\`） |
 | 提示 `daemon-missing` | 诊断里的 `daemon.seed`、包内 `bin\winsync-daemon.exe.gz`、`<state>\bin\`、`Program Files\WinSync\`、`PATH` | `cargo build -p sync-daemon --release` 后把 exe 放进 `<state>\bin\`，或重新 `npm run pack` 打一个自带种子的包，或在设置里填绝对路径 |
 | 诊断里 `daemon.seed.error` 是 `EBUSY`/`EPERM` | 状态目录里的旧 exe 正在跑，种子换不上去 | 正常（沿用旧副本）；要让新 exe 生效就退 dsh 再启动一次 |
-| 改了界面却不生效 | 是不是只 `pnpm install` 没重启 dsh | 客户端 bundle 在页面加载时注入，**必须重启 dsh**；重装前记得删旧的 `node_modules/dsh-winsync`（pnpm 会硬链旧快照） |
+| 改了界面却不生效 | **先看侧栏底部的版本角标**：版本与 commit 是不是你以为的那一版 | 客户端 bundle 在页面加载时注入，**必须重启 dsh**；重装前记得删旧的 `node_modules/dsh-winsync`（pnpm 会硬链旧快照） |
+| 「功能看着像丢了」/ 不确定装的是哪一版 | 侧栏底部角标；或 `curl http://127.0.0.1:<port>/winsync/api/version`；`/ping` 与 `/diag` 也带版本 | 角标带 `+dirty` 说明是未提交的工作区打的包；版本对不上就是旧快照，删 `node_modules/dsh-winsync` 重装并重启 dsh |
 | 进了同步页退不出来 | 点 dsh 左侧栏里的任意会话，或按 `Ctrl+B` 收起/展开侧栏 | 主区槽由宿主 `layout.selectPanel(null)` 接管；插件不再自带返回按钮 |
 | 同步「看着很慢」 | 设置里的限速是不是非 0 | 1.5 MB @ 256 KB/s 实测 6.6 秒。旧版本把 KB/s 当 kbit/s，慢 8 倍，见 `sync/README.md` |
 | 报 `Connection reset without closing handshake` | 房间是不是已经满了（一个房间最多 2 端） | 中继发完 `Bye` 立刻断 socket，客户端只看得到协议错误。先确认没有第二个进程/任务连同一个房间；对端残留的旧会话要重启 exe 才会断 |
@@ -197,6 +208,8 @@ npm run pack
 node test/client-smoke.mjs   # 客户端注册契约（main 面板 + 左栏行 + 返回对话出口）
 node test/p2-smoke.mjs       # 宿主：路由、代理、CRUD 透传、SSE、工具、卸载清理、/diag 脱敏
 node test/seed-binary.mjs    # 包内种子展开：字节一致、幂等、换种子重展开、坏种子不致命
+node test/version.mjs        # /version：不依赖 daemon、版本与 package.json 一致、commit 形状合法
+node test/version-ui.mjs     # 版本角标（需 react/jsdom）：显示、复制、接口挂了不拖垮面板
 node test/cdp-inspect.mjs <url> [port] [--aria=同步]   # 真实页面里的渲染与截图
 
 # 同步本体（双端、安全阀、限速、与 exe 的隔离）在仓库根的 sync/tools/

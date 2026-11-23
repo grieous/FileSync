@@ -73,6 +73,18 @@ window.__ModuleLoader__.load({
 .ws-nav-item:focus-visible,.ws-btn:focus-visible,.ws-icon-btn:focus-visible{
   outline:2px solid var(--ws-accent);outline-offset:1px}
 .ws-side-foot{margin-top:auto;padding-top:10px;border-top:1px solid var(--ws-line-soft)}
+/* 侧栏底部的版本角标：装的是哪一版、哪个提交，一眼可见。
+   默认压得很淡（它不是操作，是标识），hover/聚焦才提亮；点了复制完整信息。 */
+.ws-ver{margin-top:8px;display:flex;align-items:center;gap:5px;width:100%;padding:3px 8px;
+  border:0;border-radius:5px;background:transparent;color:var(--ws-faint);font:inherit;
+  font-size:11px;line-height:1.4;text-align:left;cursor:pointer;
+  font-family:ui-monospace,Consolas,monospace;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.ws-ver:hover{background:var(--ws-hover);color:var(--ws-dim)}
+.ws-ver[data-dirty="true"]{color:#C9A227}
+.ws-ver[data-dirty="true"]:hover{color:#E0B73A}
+.ws-ver:focus{outline:none}
+.ws-ver:focus-visible{outline:2px solid var(--ws-accent);outline-offset:1px}
 .ws-content{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .ws-scroll{overflow:auto;padding:18px 24px 32px;flex:1}
 .ws-scroll::-webkit-scrollbar,.ws-raw-body::-webkit-scrollbar{width:8px;height:8px}
@@ -471,7 +483,24 @@ window.__ModuleLoader__.load({
       const [connected, setConnected] = React.useState(false)
       const [toast, setToast] = React.useState(null)
       const [rawTask, setRawTask] = React.useState(null)
+      // 插件自述（版本 + commit）：只取一次。daemon 起不来也要能显示，
+      // 否则「界面没反应」和「装的是旧包」这两件事分不开。
+      const [self, setSelf] = React.useState(null)
       const toastTimer = React.useRef(null)
+
+      React.useEffect(() => {
+        let alive = true
+        api('/version')
+          .then((body) => {
+            if (alive) setSelf(body)
+          })
+          .catch(() => {
+            /* 拿不到就不显示角标，不影响主功能 */
+          })
+        return () => {
+          alive = false
+        }
+      }, [])
 
       const notify = React.useCallback((text, tone = 'ok') => {
         setToast({ text, tone })
@@ -595,6 +624,7 @@ window.__ModuleLoader__.load({
         refresh,
         run,
         rawTask,
+        self,
         showRawLog: setRawTask,
         closeRawLog: () => setRawTask(null),
       }
@@ -1074,8 +1104,15 @@ window.__ModuleLoader__.load({
         h('h2', { className: 'ws-title' }, '设置'),
         h(
           'div',
-          { className: 'ws-sub', style: { margin: '4px 0 14px' } },
-          `版本 ${data?.version ?? '—'} · 状态目录 ${data?.data_dir ?? '—'}`,
+          { className: 'ws-sub', style: { margin: '4px 0 3px' } },
+          // 两个版本号必须分开：同步服务是 daemon 的，插件是这份 UI/代理的。
+          // 以前只写「版本 x」泛指 daemon，升级后界面还是旧的时会被误读成「已经是最新」。
+          `同步服务 ${data?.version ?? '—'} · 插件 ${store.self?.label ?? '—'}`,
+        ),
+        h(
+          'div',
+          { className: 'ws-sub', style: { margin: '0 0 14px' } },
+          `状态目录 ${data?.data_dir ?? '—'}`,
         ),
         h(
           'section',
@@ -1893,6 +1930,53 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ------------------------------------------------------------ 版本角标 */
+
+    /**
+     * 侧栏底部常驻一行「v0.5.3 · c76a83c」。
+     *
+     * 排查时最费时间的一类问题是「我明明装了新版，界面还是旧的」——bundle 由页面加载时注入、
+     * profile 里是硬链快照、仓库工作区又是另一份。让界面自己报版本，就不用猜了。
+     * 点一下复制完整信息（版本 / 提交 / 分支 / 打包时间 / 目录），贴到 issue 里够用。
+     */
+    function VersionBadge({ store }) {
+      const self = store.self
+      if (!self) return null
+
+      const short = `v${self.label ?? self.version}`
+      const detail = [
+        `dsh-winsync ${self.version}`,
+        `提交    ${self.commit ?? '未知'}${self.commitSource ? `（来源：${self.commitSource}）` : ''}`,
+        self.branch ? `分支    ${self.branch}` : null,
+        self.builtAt ? `打包    ${self.builtAt}` : null,
+        self.dirty ? '工作区  有未提交改动' : null,
+        `目录    ${self.dir ?? '—'}`,
+      ]
+        .filter(Boolean)
+        .join('\n')
+
+      const copy = async () => {
+        try {
+          await navigator.clipboard.writeText(detail)
+          store.notify('版本信息已复制', 'ok')
+        } catch {
+          store.notify(`复制失败：${self.version} / ${self.commit ?? '未知提交'}`, 'bad')
+        }
+      }
+
+      return h(
+        'button',
+        {
+          className: 'ws-ver',
+          'data-dirty': self.dirty ? 'true' : 'false',
+          title: `${detail}\n\n点击复制`,
+          'aria-label': `插件 ${short}，点击复制版本信息`,
+          onClick: () => void copy(),
+        },
+        short,
+      )
+    }
+
     /* ------------------------------------------------------------ App */
 
     function WinsyncApp() {
@@ -1947,6 +2031,7 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'ws-side-foot' },
             h('button', { className: 'ws-nav-item', onClick: () => setWizard(true) }, '+ 创建同步任务'),
+            h(VersionBadge, { store }),
           ),
         ),
         h(

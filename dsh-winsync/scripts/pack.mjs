@@ -66,11 +66,60 @@ mkdirSync(staging, { recursive: true })
 
 const expected = new Set()
 // npm 只会从 cwd 读 package.json、顺手带上 README；它们不在 files 白名单里，得自己拷
-for (const always of ['package.json', 'README.md']) {
+for (const always of ['README.md']) {
   const from = path.join(pkgDir, always)
   if (!existsSync(from)) continue
   copyFileSync(from, path.join(staging, always))
 }
+
+/**
+ * 打包时把 git 信息写进 package.json。
+ *
+ * 装到用户机器上时是没有 `.git` 的，面板没法现场问——但「装的是哪一版」恰恰是排查
+ * 「功能看着像丢了」的关键（旧 bundle / 旧硬链快照 / 新包，肉眼分不出）。
+ * 所以在这里定版：commit、分支、是否有未提交改动、打包时间。
+ */
+function gitOut(args) {
+  try {
+    return execFileSync('git', ['-C', pkgDir, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+const headCommit = gitOut(['rev-parse', '--short', 'HEAD'])
+const headBranch = gitOut(['rev-parse', '--abbrev-ref', 'HEAD'])
+const headDirty = (gitOut(['status', '--porcelain']) ?? '') !== ''
+const builtAt = new Date().toISOString()
+
+if (!headCommit) {
+  console.warn('警告：读不到 git commit（不是仓库 / 没有 git），包内只会有版本号')
+} else if (headDirty) {
+  console.warn(
+    [
+      '注意：工作区有未提交改动，包内会记 gitDirty=true ——',
+      '      装出来的面板角标永远是「+dirty」，看起来像开发者包里没提交的代码。',
+      '      正式发布请先提交源码，再执行打包，然后单独提交 dist/。',
+    ].join('\n'),
+  )
+}
+
+writeFileSync(
+  path.join(staging, 'package.json'),
+  `${JSON.stringify(
+    {
+      ...pkg,
+      ...(headCommit ? { gitCommit: headCommit, gitBranch: headBranch, gitDirty: headDirty } : {}),
+      builtAt,
+    },
+    null,
+    2,
+  )}\n`,
+)
+
 for (const rel of pkg.files) {
   // bin/ 下的东西由下面统一产出（只放压缩包），原样复制会把裸 exe 又带回去
   if (rel.startsWith('bin/')) continue
@@ -124,7 +173,7 @@ rmSync(staging, { recursive: true, force: true })
 
 const buffer = readFileSync(target)
 console.log(path.relative(process.cwd(), target) || target)
-console.log(`  version: ${pkg.version}`)
+console.log(`  version: ${pkg.version}${headCommit ? ` (${headCommit}${headDirty ? '+dirty' : ''})` : ''}`)
 console.log(`  files:   ${listing.length}（含 ${seedRel}）`)
 console.log(`  size:    ${(buffer.length / 1024 / 1024).toFixed(2)} MB`)
 console.log(`  exe:     ${(exeSize / 1024 / 1024).toFixed(2)} MB → gz ${(seed.length / 1024 / 1024).toFixed(2)} MB`)

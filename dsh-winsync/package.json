@@ -1,6 +1,6 @@
 {
   "name": "dsh-winsync",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "type": "module",
   "description": "WinSync inside DeepSeek Harness — daemon proxy, agent tools and the sync panel",
   "author": "gjn86",
@@ -15,6 +15,7 @@
     "lib/index.js",
     "lib/daemon.js",
     "lib/proxy.js",
+    "lib/version.js",
     "lib/tools.js",
     "lib/prefs.js",
     "lib/client.js",
@@ -35,6 +36,7 @@
   },
   "scripts": {
     "pack": "node scripts/pack.mjs",
-    "test": "node test/seed-binary.mjs"
+    "test": "node test/seed-binary.mjs",
+    "test:version": "node test/version.mjs"
   }
 }
