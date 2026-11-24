@@ -284,8 +284,6 @@ struct EditBuf {
     /// 中继地址分两栏：IP 与端口分开填，拼成 URL 的活交给 compose_server
     host: String,
     port: String,
-    /// 房间码默认打码：它是门禁，不该随手出现在截屏里
-    reveal_room: bool,
     token: String,
     workspace: String,
     root: String,
@@ -302,7 +300,6 @@ impl EditBuf {
             name: t.name.clone(),
             host: split_server(&t.server).0,
             port: split_server(&t.server).1,
-            reveal_room: false,
             token: t.token.clone(),
             workspace: t.workspace.clone(),
             root: t.root.clone(),
@@ -920,8 +917,11 @@ fn show_main_window() -> bool {
     }
     #[cfg(windows)]
     unsafe {
+        use windows_sys::Win32::Foundation::RECT;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+            FindWindowW, GetSystemMetrics, GetWindowRect, IsIconic, SetForegroundWindow,
+            SetWindowPos, ShowWindow, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOSIZE,
+            SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE,
         };
         let wide: Vec<u16> = window_title()
             .encode_utf16()
@@ -929,10 +929,36 @@ fn show_main_window() -> bool {
             .collect();
         let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
         if !hwnd.is_null() {
-            // 窗口可能在托盘里（SW_HIDE），先显式显示再还原，只发 SW_RESTORE 对
-            // 隐藏窗口不生效。
-            ShowWindow(hwnd, SW_SHOW);
-            ShowWindow(hwnd, SW_RESTORE);
+            // 被最小化过就先还原；只是隐藏的话这步是空操作
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+
+            // 摆到屏幕正中再显示。
+            // 以前是 SW_SHOW + SW_RESTORE：窗口会从下面滑上来（系统还原动画），
+            // 而且位置还停在用户上次拖动的地方，看着像「飘出来」。用 SetWindowPos 一次定位+显示，
+            // 既不带动画也落在正中。
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, &mut rect) != 0 {
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+                let sw = GetSystemMetrics(SM_CXSCREEN);
+                let sh = GetSystemMetrics(SM_CYSCREEN);
+                let x = ((sw - w) / 2).max(0);
+                let y = ((sh - h) / 2).max(0);
+                SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE,
+                );
+            } else {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+
             SetForegroundWindow(hwnd);
             return true;
         }
@@ -1263,6 +1289,9 @@ impl App {
             w.port = std::env::var("WINSYNC_GUI_PORT").unwrap_or_else(|_| "8443".into());
             w.channel = "123456".into();
             app.wizard = Some(w);
+            if !app.settings.tasks.is_empty() {
+                app.task_editor = Some(0);
+            }
             SELFTEST_FRAMES.store(45, Ordering::Relaxed);
         }
 
@@ -2700,64 +2729,43 @@ impl App {
             .resizable(false)
             .default_width(540.0)
             .show(ctx, |ui| {
-                field(ui, "任务名", &mut self.buf.name, "留空则用目录名", false);
-                ui.add_space(8.0);
-                relay_fields(ui, &mut self.buf.host, &mut self.buf.port);
-                ui.add_space(8.0);
-                room_field(ui, &mut self.buf.workspace, &mut self.buf.reveal_room);
-                // 老任务（修复前建的）房间码可能是 "default"，怎么都对不上；
-                // 这次配对拿到的那个才能用，给一个一键修回来的入口。
-                if let Some((room, token)) = self.last_pair.clone() {
-                    if !room.trim().is_empty() && room != self.buf.workspace.trim() {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
+                // 连接信息在新建任务时确定：这里只读展示。
+                // 让它可改，等于允许改出「配对成功却同步不了」的任务——前面几个 bug 都出在这。
+                readonly_row(ui, "任务名", &name);
+                readonly_row(ui, "中继地址", &compose_server(&self.buf.host, &self.buf.port));
+                readonly_row(ui, "房间码", &short_room(&self.buf.workspace));
+                readonly_row(
+                    ui,
+                    "同步目录",
+                    if self.buf.root.trim().is_empty() {
+                        "—"
+                    } else {
+                        self.buf.root.trim()
+                    },
+                );
+                // 例外：老任务房间码还是 default 时，允许用这次配对的结果修正一次
+                if self.buf.workspace.trim() == "default" {
+                    if let Some((room, token)) = self.last_pair.clone() {
+                        if !room.trim().is_empty() {
+                            ui.add_space(4.0);
                             if ui
                                 .small_button("用配对结果修正房间码")
                                 .on_hover_text(format!("配对得到的房间码：{room}"))
                                 .clicked()
                             {
                                 self.buf.workspace = room.clone();
-                                self.buf.token = token.clone();
-                                self.buf.reveal_room = true;
+                                self.buf.token = token;
                             }
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "配对结果：{}",
-                                    short_room(&room)
-                                ))
-                                .size(11.0)
-                                .color(ui_colors::TEXT_3),
-                            );
-                        });
-                    }
-                }
-                ui.add_space(8.0);
-                field(
-                    ui,
-                    "密钥",
-                    &mut self.buf.token,
-                    "留空则与房间码相同（中继配了房间密钥才需要填）",
-                    true,
-                );
-                ui.add_space(8.0);
-
-                ui.label(
-                    egui::RichText::new("同步目录")
-                        .size(12.0)
-                        .color(ui_colors::TEXT_2),
-                );
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.buf.root)
-                            .hint_text(r"D:/Sync")
-                            .desired_width(400.0),
-                    );
-                    if ui.button("浏览…").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            self.buf.root = dir.to_string_lossy().to_string();
                         }
                     }
-                });
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "中继、房间码、目录在新建任务时确定；要换请删除任务后重建（规则与模式随时可改）。",
+                    )
+                    .size(11.0)
+                    .color(ui_colors::TEXT_3),
+                );
 
                 ui.add_space(14.0);
                 ui.label(
@@ -3606,6 +3614,25 @@ fn new_room_code() -> String {
 fn new_channel() -> String {
     let n = uuid::Uuid::new_v4().as_u128() % 1_000_000;
     format!("{n:06}")
+}
+
+/// 只读的一行「标签：值」。任务设置里连接信息只展示不给改——
+/// 那几个字段一旦在设置里被改坏，就会出现「配对成功却同步不了」。
+fn readonly_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(label)
+                .size(11.0)
+                .color(ui_colors::TEXT_3),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(if value.trim().is_empty() { "—" } else { value })
+                .size(12.0)
+                .monospace()
+                .color(ui_colors::TEXT_2),
+        );
+    });
 }
 
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, password: bool) {
