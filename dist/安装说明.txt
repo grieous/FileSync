@@ -1,7 +1,7 @@
-WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.5 / 中继 exe 0.6（Docker 镜像仍是 0.5））
+WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.6 / 中继 0.6）
 
 一、只装 dsh 插件（Windows，推荐）
-  dsh plugin --profile desktop add "本目录\dsh-winsync-0.8.5.tgz"
+  dsh plugin --profile desktop add "本目录\dsh-winsync-0.8.6.tgz"
   重启 dsh → 左侧栏「文件同步」。
   插件包里自带 daemon（bin/winsync-daemon.exe.gz，首次运行展开到
   %LOCALAPPDATA%\dsh-winsync\bin），不需要另外放文件。
@@ -47,26 +47,18 @@ WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.5 / 中继 exe 0.6（D
      注意：配了房间级密钥就是逐房间校验，配对通道（通道码::pair）也得放行，
      否则第一步永远连不上——加一条 "*" 兜底密钥最省事。
 
-四、单机验证（中继和 dsh 在同一台电脑，不需要 Docker）
-  1. 命令行启动中继：
-       winsync-relay.exe                        默认监听 0.0.0.0:8443
-       set SYNC_ADDR=0.0.0.0:18443 && winsync-relay.exe    想换端口就设这个
-     看到「relay 已启动于 …（无状态，不落盘）」即成功。
-  2. 插件里中继地址：IP 填 127.0.0.1（或点下面那行「填成本机 127.0.0.1」），端口填中继实际监听的
-     那个（exe 默认 8443；docker -p 18443:8443 对外是 18443）。点「测试地址」，
-     绿字「地址通了」＝这一段没问题。
-  3. 之后照常：通道码自动生成，另一台机器（或同一台上另开一次向导）填同一个 6 位码即配对。
-
-  公司网络常见问题：跨 VLAN 不通、端口被策略拦、走了代理。
-  先「测试地址」——超时（10060）说明这台机器到不了那个地址（换网段/防火墙/地址笔误），
-  被拒（10061）才是端口没人监听（中继没起或端口映射不对）。
+四、连不上中继时先看三件事
+  1. 端口：填 docker -p 的左边那个。`-p 10023:8443` 对外是 10023，不是容器里的 8443。
+  2. 超时（os error 10060）＝这台机器到不了那个地址：端口写错、跨网段、防火墙丢包。
+     被拒（os error 10061）＝主机到了，但这个端口没人监听：容器没起或映射写错。
+  3. 两端都能连上中继却配不上对：看两端卡片上的「配对房间 xxxxxx::pair」是否一致，
+     再在中继上 `docker logs -f winsync-relay` 看「加入 / 配对成功 / 房间已满」。
 
 五、文件
-  dsh-winsync-0.8.5.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
+  dsh-winsync-0.8.6.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
   winsync-relay-0.6.tar.gz     中继镜像（Linux/amd64，docker load -i 导入；1.2 MB，无基础镜像）
   Dockerfile.relay             上面那个镜像的「一条命令重建」版（FROM scratch + 静态二进制，3 秒）
   winsync-relay-linux-amd64    中继的静态 Linux 二进制（不装 Docker 也能直接跑）
-  winsync-relay.exe            Windows 中继（免 Docker；SYNC_ADDR 指定监听地址）
   winsync-daemon.exe           单独一份 daemon（备用；插件包内已有）
   winsync.exe                  命令行客户端（排查用）
   winsync-gui.exe              独立图形界面（不装 dsh 也能用）

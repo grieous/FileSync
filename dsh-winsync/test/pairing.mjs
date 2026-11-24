@@ -31,11 +31,8 @@ const BUNDLE = process.env.WINSYNC_CLIENT ?? fileURLToPath(new URL('../lib/clien
 /* ------------------------------------------------------------ 假 daemon */
 
 const started = [] // 每次 POST /api/presence 的请求体
-const probed = [] // 每次 POST /api/probe 的请求体
 let stopCount = 0
 let presence = { state: 'waiting', peer: '', error: '', room: '' }
-// /api/probe 的结论由用例现场设置
-let probeResult = { state: 'accepted', elapsed_ms: 9 }
 
 /** 浏览器里一次 WebSocket 都不该建：配对的网络动作全部在 daemon 侧。 */
 const sockets = []
@@ -120,9 +117,6 @@ function setup() {
         presence = { ...presence, room: sent.workspace ?? '', peer: presence.peer ?? '' }
       }
       body = { ok: true, presence }
-    } else if (target.includes('/probe')) {
-      probed.push(JSON.parse(init.body ?? '{}'))
-      body = { ok: true, result: probeResult }
     } else if (target.includes('/state')) {
       body = state
     } else if (target.includes('/version')) {
@@ -265,40 +259,6 @@ assert.equal(started[0].announce.split('|')[0], room, '见面礼里的房间码�
 assert.equal(sockets.length, 0, '不应该在浏览器里连中继')
 console.log('PASS 填地址自动进配对通道（6 位码），并把自己的房间配置挂上去')
 
-/* 3b. 「测试地址」：超时必须说清是网络/地址，不能拿「端口填第二栏」误导人 */
-
-probeResult = {
-  state: 'unreachable',
-  message:
-    '连不上 ws://10.90.45.64:38443/ws：IO error: 由于连接方在一段时间后没有正确答复或连接主机没有反应，连接尝试失败。 (os error 10060)',
-}
-await click(byText('.ws-btn', '测试地址'))
-await React.act(async () => {
-  await wait(60)
-})
-assert.equal(probed.length, 1, '没发起 /probe')
-assert.equal(probed[0].server, 'ws://127.0.0.1:18443/ws', `探测地址不对：${probed[0].server}`)
-assert.match(text(), /没有任何响应/, '超时时没说是「没有响应」')
-assert.match(text(), /笔误/, '超时时没提示可能是地址写错')
-assert.ok(!/端口填在第二栏/.test(text()), '超时不该再甩「端口填在第二栏」这种误导')
-
-// 端口通了但没人监听：这时才该怀疑端口号
-probeResult = { state: 'unreachable', message: '... (os error 10061) 由于目标计算机积极拒绝' }
-await click(byText('.ws-btn', '测试地址'))
-await React.act(async () => {
-  await wait(60)
-})
-assert.match(text(), /没人监听/, '被拒绝时没说是端口没人监听')
-
-// 通了
-probeResult = { state: 'accepted', elapsed_ms: 9 }
-await click(byText('.ws-btn', '测试地址'))
-await React.act(async () => {
-  await wait(60)
-})
-assert.match(text(), /地址通了/, '探测通过时没给出明确结论')
-console.log('PASS 测试地址：超时/被拒/通过 三种结论分别说清')
-
 /* 4. 只有我一端 → 明确等待，且拦住下一步 */
 
 assert.match(text(), /正在等对方/, '等待对端时没给出明确文案')
@@ -353,8 +313,20 @@ console.log('PASS 中继 Bye「房间已满」原样显示，并给出处理办�
 
 /* 8. 连不上 → 同样拦住，并提示检查端口 */
 
-await applyPresence({ state: 'unreachable', error: '连不上 ws://127.0.0.1:18443/ws' })
-assert.match(text(), /连不上中继/, '连不上时没有明确提示')
+await applyPresence({
+  state: 'unreachable',
+  error: '连不上 ws://10.90.45.64:38443/ws：IO error: 连接尝试失败。 (os error 10060)',
+})
+assert.match(text(), /没有任何响应/, '超时时要说是「没有响应」')
+assert.match(text(), /端口号是否笔误/, '超时时没提示可能端口写错')
+assert.ok(!/端口填在第二栏/.test(text()), '超时不该再说「端口填在第二栏」')
+
+// 被拒绝是另一回事：主机通了、端口没人监听
+await applyPresence({
+  state: 'unreachable',
+  error: '连不上 ws://10.90.45.64:10023/ws：由于目标计算机积极拒绝，无法连接。 (os error 10061)',
+})
+assert.match(text(), /没人监听/, '被拒时要说端口没人监听')
 assert.equal(nextButton().disabled, true, '连不上中继时应当拦住「下一步」')
 console.log('PASS 连不上中继时拦住下一步')
 
