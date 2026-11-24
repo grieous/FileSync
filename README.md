@@ -50,8 +50,17 @@ cargo build --release -p sync-client
 # 单元测试
 cargo test --workspace
 
-# Linux 服务端（在 Linux/WSL 上执行，产出静态二进制）
-cargo build --release -p sync-server --target x86_64-unknown-linux-musl
+# Linux 服务端：Windows 上也能交叉编译——musl 目标自带 std 与 libc，
+# 用工具链里的 rust-lld 链接即可，不需要 Linux 机器、也不需要 gcc
+rustup target add x86_64-unknown-linux-musl
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$HOME/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe" \
+  cargo build --release -p sync-server --target x86_64-unknown-linux-musl
+
+# 打成 docker 能直接 load 的镜像 tar（离线手写老格式：一层 + config + manifest，
+# 无基础镜像，约 1.2 MB；有 docker 的机器也可以改用 dist/Dockerfile.relay 三秒重建）
+node sync/deploy/make-image.mjs \
+  target/x86_64-unknown-linux-musl/release/sync-server \
+  dist/winsync-relay-0.6.tar.gz winsync-relay:0.6
 ```
 
 国内网络建议先把 cargo 源指向镜像，否则拉依赖会很慢：
@@ -70,7 +79,7 @@ git-fetch-with-cli = true
 
 ## 部署服务端
 
-服务器只需要**一个约 8 MB 的静态二进制**，不需要数据库、Redis、对象存储，也不需要在服务器上装 Rust（除非选择就地编译）。
+服务器只需要**一个约 3 MB 的静态二进制**，不需要数据库、Redis、对象存储，也不需要在服务器上装 Rust（除非选择就地编译）。
 
 ```bash
 # 上传二进制与脚本后，一条命令完成：建系统用户、生成密钥、注册 systemd、启动

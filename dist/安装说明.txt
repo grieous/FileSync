@@ -30,14 +30,20 @@ WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.5 / 中继 exe 0.6（D
   中继只做转发、不落盘。真正同步的数据只在两台机器的 daemon 之间走。
 
 三、中继（Linux / Docker，Windows 见第四节）
-  1. docker load < winsync-relay-0.5.tar.gz
-  2. 开放配对（默认，靠随机房间码保密）：
-       docker run -d --name winsync-relay -p 18443:8443 --restart=always \
-         -e SYNC_RATE_LIMIT=30 winsync-relay:0.5
-  3. 想让中继把「拒绝进入房间」的原因（房间已满等）说清楚，镜像需要重建（0.5 版是静默断开）：
-       cd 仓库 && docker build -f sync/deploy/Dockerfile -t winsync-relay:0.6 .
-     旧镜像仍可用，只是房间满时客户端只看到「连接被断开」。
-  4. 需要固定口令时，加 -e SYNC_ROOM_TOKENS='{"default":"你的密钥","*":"你的密钥"}'
+  0.6 版镜像已经打好在 dist 里，不用在服务器上编译（原来要下载 crates、约 10 分钟）：
+  1. docker load -i winsync-relay-0.6.tar.gz
+  2. 起容器（端口映射按你原来的，冒号左边是对外端口）：
+       docker run -d --name winsync-relay -p 38443:8443 --restart=always \
+         -e SYNC_RATE_LIMIT=30 winsync-relay:0.6
+     换机器/换标签时先 docker rm -f winsync-relay。
+  3. 万一 docker load 报 invalid tar header / no such image（这个 tar 是离线手工打包的老格式），
+     用同一个二进制在 3 秒内重建，效果完全一样：
+       cd dist && docker build -f Dockerfile.relay -t winsync-relay:0.6 .
+  4. 也可以完全不用 Docker：把 winsync-relay-linux-amd64 拷到服务器上
+       chmod +x winsync-relay-linux-amd64 && SYNC_ADDR=0.0.0.0:38443 ./winsync-relay-linux-amd64
+  5. 0.6 相比 0.5 的差别：拒绝入房（房间已满）时会把原因发给客户端并打日志；
+     0.5 是静默断开，客户端只能看到「连上又断」，排查时全靠猜。
+  6. 需要固定口令时，加 -e SYNC_ROOM_TOKENS='{"default":"你的密钥","*":"你的密钥"}'
      注意：配了房间级密钥就是逐房间校验，配对通道（通道码::pair）也得放行，
      否则第一步永远连不上——加一条 "*" 兜底密钥最省事。
 
@@ -57,8 +63,10 @@ WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.5 / 中继 exe 0.6（D
 
 五、文件
   dsh-winsync-0.8.5.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
+  winsync-relay-0.6.tar.gz     中继镜像（Linux/amd64，docker load -i 导入；1.2 MB，无基础镜像）
+  Dockerfile.relay             上面那个镜像的「一条命令重建」版（FROM scratch + 静态二进制，3 秒）
+  winsync-relay-linux-amd64    中继的静态 Linux 二进制（不装 Docker 也能直接跑）
   winsync-relay.exe            Windows 中继（免 Docker；SYNC_ADDR 指定监听地址）
-  winsync-relay-0.5.tar.gz     中继镜像（docker load 导入，Linux 用）
   winsync-daemon.exe           单独一份 daemon（备用；插件包内已有）
   winsync.exe                  命令行客户端（排查用）
   winsync-gui.exe              独立图形界面（不装 dsh 也能用）

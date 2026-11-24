@@ -1,0 +1,16 @@
+# 中继镜像的「一条命令重建」版：镜像里只有一个静态二进制，不需要基础镜像、不下载 crates。
+#
+#   cd dist
+#   docker build -f Dockerfile.relay -t winsync-relay:0.6 .
+#
+# 什么时候需要它：`docker load -i winsync-relay-0.6.tar.gz` 在你的 docker 版本上报
+# invalid tar header / no such image（那个 tar 是离线手工打的老格式包）。
+# 两者内容一致：同一个 sync-server 二进制、同样的环境变量与入口。
+FROM scratch
+COPY winsync-relay-linux-amd64 /sync-server
+ENV SYNC_ADDR=0.0.0.0:8443 \
+    RUST_LOG=info
+EXPOSE 8443
+# 中继只做转发、不落盘，不需要 root；65534 是 nobody
+USER 65534:65534
+ENTRYPOINT ["/sync-server"]
