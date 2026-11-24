@@ -429,12 +429,12 @@ window.__ModuleLoader__.load({
       const where = target || '这个地址'
       if (/10061|refused|拒绝/i.test(text)) {
         return `主机通了，但 ${where} 这个端口没人监听：核对端口号（docker 里 -p 18443:8443，对外就是 18443），`
-          + '或确认中继容器在跑。'
+          + '或确认中继容器在跑。中继若就在这台电脑上，IP 填 127.0.0.1。'
       }
       if (/10060|timed? ?out|超时|没有正确答复|没连上|\d+ ?秒内/i.test(text)) {
         return `${where} 没有任何响应（超时，不是密钥问题）：这台机器到不了这个地址。`
           + '① 地址是否笔误（把 18443 写成 38443？）② 两台机器是否同一网络（跨网段 / 换 WiFi / 连 VPN 都会这样）'
-          + '③ 中继主机防火墙是否放行。可用「测试地址」单独验，不用等配对。'
+          + '③ 中继主机防火墙是否放行。若中继就在这台电脑上，把 IP 改成 127.0.0.1 试试。'
       }
       return `${text || '连不上中继'}（目标 ${where}）`
     }
@@ -2010,6 +2010,27 @@ window.__ModuleLoader__.load({
                 probe.text,
               )
             : h('span', { className: 'ws-hint', style: { margin: 0 } }, '先单独确认这台机器能不能连到这里'),
+        ),
+        // 单机验证（中继和 dsh 装在同一台电脑）是这个工具最常见的第一次用法，
+        // 但没人会想到「IP 要填 127.0.0.1、端口要填容器映射出来的那个」
+        h(
+          'div',
+          { className: 'ws-hint', style: { marginTop: 2 } },
+          '中继和 dsh 在同一台电脑上？',
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'ws-link',
+              style: { marginLeft: 4 },
+              onClick: () => {
+                setProbe(null)
+                // 端口不猜：winsync-relay.exe 默认 8443，docker -p 18443:8443 对外是 18443
+                patch({ host: '127.0.0.1' })
+              },
+            },
+            '填成本机 127.0.0.1',
+          ),
         ),
       )
 
