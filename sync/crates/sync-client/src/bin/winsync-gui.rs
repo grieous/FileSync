@@ -1369,21 +1369,43 @@ impl App {
         if i >= self.settings.tasks.len() {
             return;
         }
+        // 现在删除会连同步快照一起清掉，不可逆；先问一句。
+        // 弹的是系统对话框，两个入口（卡片菜单 / 设置里）共用这一处。
+        let ask = rfd::MessageDialog::new()
+            .set_title("删除任务")
+            .set_description(format!(
+                "删除「{}」？\n\n同步记录与已同步快照会一起清掉；磁盘上的文件不会动。",
+                self.settings.tasks[i].display_name()
+            ))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if !matches!(ask, rfd::MessageDialogResult::Yes) {
+            return;
+        }
+
         let task = self.settings.tasks.remove(i);
         self.runtimes.remove(i);
         let _ = self.settings.save();
-        log_line(&format!(
-            "已删除任务 {}（状态库保留在 {}）",
-            task.display_name(),
-            task.state_db().display()
-        ));
-        if self.selected >= self.settings.tasks.len() {
-            self.selected = self.settings.tasks.len().saturating_sub(1);
+
+        // 删任务就把它的状态库一起删掉（里面有 base 快照、根目录、记录）
+        let note = purge_task_state(&task.state_db());
+        // 顺带把界面里残留的这间房的信息清掉
+        self.last_pair = None;
+        if self.records_task.as_deref() == Some(task.id.as_str()) || self.records_task.is_none() {
+            self.records.clear();
+            self.records_loaded = false;
         }
-        if let Some(t) = self.settings.tasks.get(self.selected) {
+        if self.settings.tasks.is_empty() {
+            // 最后一个任务删掉后，编辑缓冲里还留着它的地址/房间码；
+            // 不清掉的话「新建」会看着像沿用旧房，容易配成两台机器各说各话。
+            self.selected = 0;
+            self.buf = EditBuf::from_task(&Config::default());
+        } else if let Some(t) = self.settings.tasks.get(self.selected.min(self.settings.tasks.len() - 1))
+        {
+            self.selected = self.selected.min(self.settings.tasks.len() - 1);
             self.buf = EditBuf::from_task(t);
         }
-        self.records_loaded = false;
+        log_line(&format!("已删除任务 {}{note}", task.display_name()));
     }
 
     fn toggle_pause(&mut self, i: usize) {
@@ -3616,6 +3638,36 @@ fn new_channel() -> String {
     format!("{n:06}")
 }
 
+/// 删任务时连带清掉它的状态库（sqlite 主文件 + `-wal` / `-shm`）。
+///
+/// 库里不只是同步记录，还有 base 快照和根目录——等于「这一间房同步过什么」。
+/// 用户删任务就是想把这套东西清干净，留一个孤儿 .db 没有意义。
+/// 返回一句给人看的备注（删不掉时才不为空）。
+fn purge_task_state(db: &std::path::Path) -> String {
+    let side = |suffix: &str| {
+        let mut p = db.as_os_str().to_os_string();
+        p.push(suffix);
+        std::path::PathBuf::from(p)
+    };
+    let mut note = String::new();
+    match std::fs::remove_file(db) {
+        Ok(()) => {
+            for suffix in ["-wal", "-shm"] {
+                let _ = std::fs::remove_file(side(suffix));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // 多半是还有同步线程占着：别硬删，留一句提示让人手动处理
+        Err(e) => {
+            note = format!(
+                "；状态库未能删除（{e}），可手动清理 {}",
+                db.display()
+            );
+        }
+    }
+    note
+}
+
 /// 只读的一行「标签：值」。任务设置里连接信息只展示不给改——
 /// 那几个字段一旦在设置里被改坏，就会出现「配对成功却同步不了」。
 fn readonly_row(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -3865,6 +3917,25 @@ mod pair_tests {
             assert_eq!(c.len(), 6, "{c}");
             assert!(c.chars().all(|ch| ch.is_ascii_digit()), "{c}");
         }
+    }
+
+    /// 删任务要连状态库一起清：留着 .db 就等于留着这间房的 base 与根目录。
+    #[test]
+    fn purge_task_state_removes_db_and_side_files() {
+        let dir = std::env::temp_dir().join(format!("ws-purge-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        std::fs::write(&db, b"x").unwrap();
+        std::fs::write(dir.join("t.db-wal"), b"x").unwrap();
+        std::fs::write(dir.join("t.db-shm"), b"x").unwrap();
+        let note = purge_task_state(&db);
+        assert!(note.is_empty(), "不该有报错备注：{note}");
+        assert!(!db.exists(), "主库没删掉");
+        assert!(!dir.join("t.db-wal").exists(), "-wal 没删掉");
+        assert!(!dir.join("t.db-shm").exists(), "-shm 没删掉");
+        // 不存在时也不该报错（幂等）
+        assert!(purge_task_state(&db).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 沿用旧任务时，遗留的 "default" 必须当成没填：不然新任务又建在 default 房间里。
