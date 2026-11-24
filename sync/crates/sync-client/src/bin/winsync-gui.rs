@@ -11,15 +11,17 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use futures_util::{SinkExt, StreamExt};
 use notify::Watcher;
 use sync_client::config::{new_id, Settings, SyncMode};
 use sync_client::session::{self, Event, Limits, Report};
 use sync_client::Config;
 use sync_core::{Activity, Filter, Store};
+use sync_proto::{Frame as WireFrame, Msg, PROTO_VER};
 
 enum WorkerMsg {
     Event { task: String, ev: Event },
@@ -50,6 +52,200 @@ mod ui_colors {
     pub const SUCCESS: Color32 = Color32::from_rgb(0x4C, 0xC3, 0x8A);
     pub const DANGER: Color32 = Color32::from_rgb(0xF0, 0x55, 0x4D);
     pub const WARN: Color32 = Color32::from_rgb(0xE6, 0xA2, 0x3C);
+}
+
+/// 仅 debug 构建：设 WINSYNC_GUI_SELFTEST=1 时启动就打开向导、画 N 帧后退出。
+/// 用来在没有人点鼠标的情况下真正走一遍第一步的布局（能抓到 panic）。
+#[cfg(debug_assertions)]
+static SELFTEST_FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/* ------------------------------------------------------------ 配对（旁路房间） */
+
+/// 配对阶段，语义与 dsh 插件一致：**一次性握手**，配上过就不再回退门禁。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PairPhase {
+    Idle,
+    Connecting,
+    Waiting,
+    Paired,
+    Denied,
+    Unreachable,
+}
+
+impl PairPhase {
+    fn title(self, ever_paired: bool) -> &'static str {
+        match self {
+            PairPhase::Paired => "配对已通过",
+            PairPhase::Waiting if ever_paired => "已配对过，对端当前不在线",
+            PairPhase::Waiting => "已连上中继，正在等对方",
+            PairPhase::Connecting => "正在连接中继…",
+            PairPhase::Denied => "中继拒绝了配对通道",
+            PairPhase::Unreachable => "连不上中继",
+            PairPhase::Idle => "还没开始配对",
+        }
+    }
+}
+
+/// 配对线程发给界面的消息；带 gen，过期的直接丢。
+#[derive(Clone)]
+enum PairEvent {
+    /// (阶段, 对端标识, 错误原文)
+    Phase(PairPhase, String, String),
+    /// 创建端挂在 device id 上带过来的「房间码, 密钥」
+    Carried(String, String),
+}
+
+fn hex_of(text: &str) -> String {
+    text.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 对端 device id 里 `~` 后面那段十六进制是创建端塞进来的「房间码|密钥」，
+/// 解出来加入端直接填上，不用手抄 32 位。
+fn parse_announce(device: &str) -> Option<(String, String)> {
+    let (_, hex) = device.split_once('~')?;
+    if hex.len() % 2 != 0 || hex.is_empty() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for i in (0..hex.len()).step_by(2) {
+        bytes.push(u8::from_str_radix(&hex[i..i + 2], 16).ok()?);
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let (room, token) = text.split_once('|')?;
+    Some((room.to_string(), token.to_string()))
+}
+
+/// 起一条配对守护线程：连 `<通道码>::pair`、发 Hello、读 PeerStatus。
+///
+/// 为什么不直接复用 daemon 那份：daemon 是全局单例状态 + HTTP 轮询，GUI 是每帧轮询界面状态，
+/// 接法不同；协议这一段（Hello / PeerStatus / Bye）照搬，语义不另起一套。
+fn spawn_pairing(
+    gen: u64,
+    url: String,
+    room: String,
+    device: String,
+    tx: Sender<(u64, PairEvent)>,
+    stop: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return,
+        };
+        rt.block_on(async move {
+            let side_room = format!("{room}::pair");
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let _ = tx.send((
+                    gen,
+                    PairEvent::Phase(PairPhase::Connecting, String::new(), String::new()),
+                ));
+                match tokio_tungstenite::connect_async(url.as_str()).await {
+                    Err(err) => {
+                        let denied = matches!(
+                            &err,
+                            tokio_tungstenite::tungstenite::Error::Http(resp) if resp.status() == 401
+                        );
+                        let msg = if denied {
+                            "中继拒绝了配对通道：中继若开了房间级密钥，配对房间也要放行（给 SYNC_ROOMS 加一条 \"*\" 兜底密钥）".to_string()
+                        } else {
+                            format!("连不上 {url}：{err}")
+                        };
+                        let phase = if denied {
+                            PairPhase::Denied
+                        } else {
+                            PairPhase::Unreachable
+                        };
+                        let _ = tx.send((gen, PairEvent::Phase(phase, String::new(), msg)));
+                        tokio::time::sleep(Duration::from_millis(if denied { 5000 } else { 2000 }))
+                            .await;
+                    }
+                    Ok((mut socket, _)) => {
+                        let hello = WireFrame::Control(Msg::Hello {
+                            device_id: device.clone(),
+                            workspace_id: side_room.clone(),
+                            proto_ver: PROTO_VER,
+                        });
+                        if socket
+                            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                                hello.encode(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            tokio::time::sleep(Duration::from_millis(1200)).await;
+                            continue;
+                        }
+                        let _ = tx.send((
+                            gen,
+                            PairEvent::Phase(PairPhase::Waiting, String::new(), String::new()),
+                        ));
+                        loop {
+                            if stop.load(Ordering::Relaxed) {
+                                let _ = socket.close(None).await;
+                                return;
+                            }
+                            // 500ms 醒一次：点「重新配对」或关向导时能立刻退
+                            let next = tokio::time::timeout(
+                                Duration::from_millis(500),
+                                socket.next(),
+                            )
+                            .await;
+                            let msg = match next {
+                                Ok(Some(Ok(msg))) => msg,
+                                Ok(Some(Err(_))) | Ok(None) => break,
+                                Err(_) => continue,
+                            };
+                            match msg {
+                                tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                                    match WireFrame::decode(&data) {
+                                        Ok(WireFrame::Control(Msg::PeerStatus {
+                                            peer_online,
+                                            peer_device_id,
+                                        })) => {
+                                            let peer = peer_device_id.unwrap_or_default();
+                                            if peer_online {
+                                                if let Some((room, token)) = parse_announce(&peer) {
+                                                    let _ =
+                                                        tx.send((gen, PairEvent::Carried(room, token)));
+                                                }
+                                            }
+                                            let phase = if peer_online {
+                                                PairPhase::Paired
+                                            } else {
+                                                PairPhase::Waiting
+                                            };
+                                            let _ = tx.send((
+                                                gen,
+                                                PairEvent::Phase(phase, peer, String::new()),
+                                            ));
+                                        }
+                                        // 中继赶客（房间满 / 顶号）：原话转给界面，别当普通掉线
+                                        Ok(WireFrame::Control(Msg::Bye { reason })) => {
+                                            let _ = tx.send((
+                                                gen,
+                                                PairEvent::Phase(PairPhase::Denied, String::new(), reason),
+                                            ));
+                                            return;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                                _ => {}
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                    }
+                }
+            }
+        });
+    });
 }
 
 struct Runtime {
@@ -154,6 +350,10 @@ impl EditBuf {
 /// 新建任务向导：1 同步设备 → 2 规则设置 → 3 同步路径（与飞牛同步一致）
 struct Wizard {
     step: u8,
+    /// 0 = 创建新同步，1 = 加入已有同步（与插件的两个入口一致）
+    entry: u8,
+    /// 6 位通道码：配对只交换这串数字，房间码由配对通道自己带过去
+    channel: String,
     host: String,
     port: String,
     reveal_room: bool,
@@ -165,12 +365,26 @@ struct Wizard {
     root: String,
     name: String,
     note: String,
+    // ---- 配对 ----
+    pair_phase: PairPhase,
+    pair_peer: String,
+    pair_error: String,
+    /// 配上过就是配上过：对端随后离开不把门禁关回去
+    ever_paired: bool,
+    pair_gen: u64,
+    /// 当前这条守护线程的「配置指纹」，变了就重开
+    pair_key: String,
+    pair_stop: Option<Arc<AtomicBool>>,
+    /// 配置刚改过就等 500ms 再起线程：否则每敲一个字符都会起一条
+    pair_pending: Option<Instant>,
 }
 
 impl Wizard {
     fn new(seed: Option<&Config>) -> Self {
         Self {
             step: 0,
+            entry: 0,
+            channel: new_channel(),
             host: seed.map(|t| split_server(&t.server).0).unwrap_or_default(),
             port: seed.map(|t| split_server(&t.server).1).unwrap_or_default(),
             reveal_room: false,
@@ -185,7 +399,28 @@ impl Wizard {
             root: String::new(),
             name: String::new(),
             note: String::new(),
+            pair_phase: PairPhase::Idle,
+            pair_peer: String::new(),
+            pair_error: String::new(),
+            ever_paired: false,
+            pair_gen: 0,
+            pair_key: String::new(),
+            pair_stop: None,
+            pair_pending: None,
         }
+    }
+
+    /// 配对门禁：配上过就放行（一次性握手），否则拦住第一步。
+    fn pairing_done(&self) -> bool {
+        self.pair_phase == PairPhase::Paired || self.ever_paired
+    }
+
+    /// 关掉守护线程。放这里是为了「取消 / 关闭 / 换配置」都只调一处。
+    fn stop_pairing(&mut self) {
+        if let Some(stop) = self.pair_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        self.pair_key.clear();
     }
 
     fn to_task(&self) -> Config {
@@ -656,6 +891,9 @@ struct App {
     rx: Receiver<WorkerMsg>,
     watch_tx: Sender<String>,
     watch_rx: Receiver<String>,
+    /// 配对守护 → 界面（带 gen，过期的丢）
+    pair_tx: Sender<(u64, PairEvent)>,
+    pair_rx: Receiver<(u64, PairEvent)>,
 
     tray_ready: bool,
     quitting: bool,
@@ -683,6 +921,7 @@ impl App {
 
         let (tx, rx) = channel();
         let (watch_tx, watch_rx) = channel();
+        let (pair_tx, pair_rx) = channel();
 
         #[cfg(windows)]
         let autostart = autostart_get();
@@ -711,11 +950,23 @@ impl App {
             rx,
             watch_tx,
             watch_rx,
+            pair_tx,
+            pair_rx,
             tray_ready: false,
             quitting: false,
             hidden_notice: false,
             autostart,
         };
+
+        #[cfg(debug_assertions)]
+        if std::env::var("WINSYNC_GUI_SELFTEST").is_ok() {
+            let mut w = Wizard::new(None);
+            w.host = std::env::var("WINSYNC_GUI_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+            w.port = std::env::var("WINSYNC_GUI_PORT").unwrap_or_else(|_| "8443".into());
+            w.channel = "123456".into();
+            app.wizard = Some(w);
+            SELFTEST_FRAMES.store(45, Ordering::Relaxed);
+        }
 
         let deadline = Instant::now() + Duration::from_millis(1000);
         while Instant::now() < deadline && !tray_ready() {
@@ -884,6 +1135,75 @@ impl App {
         });
     }
 
+    /// 按需起/重起配对守护：地址填好、通道码满 6 位就自动开始（与插件一致）。
+    /// 「配置指纹」变了才重开，否则每帧都会起一条新线程。
+    fn sync_pairing(&mut self) {
+        let Some(w) = self.wizard.as_mut() else {
+            return;
+        };
+        if w.step != 0 {
+            return;
+        }
+        let channel = w.channel.trim().to_string();
+        if channel.len() != 6 || !channel.chars().all(|c| c.is_ascii_digit()) {
+            return;
+        }
+        if w.host.trim().is_empty() {
+            return;
+        }
+        let server = compose_server(&w.host, &w.port);
+        let key = format!("{}|{}|{}", channel, server, w.entry);
+        if key == w.pair_key {
+            w.pair_pending = None;
+            return;
+        }
+        // 每敲一个字符 key 都会变：先记下时间，安静 500ms 再起线程
+        match w.pair_pending {
+            None => {
+                w.pair_pending = Some(Instant::now());
+                return;
+            }
+            Some(at) if at.elapsed() < Duration::from_millis(500) => return,
+            Some(_) => {}
+        }
+        w.pair_pending = None;
+        w.stop_pairing();
+        w.pair_gen += 1;
+        w.pair_key = key;
+        w.pair_phase = PairPhase::Connecting;
+        w.pair_peer.clear();
+        w.pair_error.clear();
+
+        // 创建端把「房间码|密钥」挂在 device id 上带过去；加入端只收不发
+        let announce = if w.entry == 0 && !w.workspace.trim().is_empty() {
+            let room = w.workspace.trim();
+            let token = if w.token.trim().is_empty() {
+                room
+            } else {
+                w.token.trim()
+            };
+            format!("{room}|{token}")
+        } else {
+            String::new()
+        };
+        let device = if announce.is_empty() {
+            format!("gui-{}", uuid::Uuid::new_v4().simple())
+        } else {
+            format!("gui-{}~{}", uuid::Uuid::new_v4().simple(), hex_of(&announce))
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        w.pair_stop = Some(stop.clone());
+        spawn_pairing(
+            w.pair_gen,
+            server,
+            channel,
+            device,
+            self.pair_tx.clone(),
+            stop,
+        );
+    }
+
     fn task_index(&self, id: &str) -> Option<usize> {
         self.settings.tasks.iter().position(|t| t.id == id)
     }
@@ -1008,6 +1328,46 @@ impl eframe::App for App {
                 self.log(0, "已隐藏到托盘，同步继续运行（点托盘图标打开）");
                 self.hidden_notice = true;
             }
+        }
+
+        // 配对守护发来的阶段变化：只认当前这一代，旧线程的事件直接丢
+        while let Ok((gen, ev)) = self.pair_rx.try_recv() {
+            if let Some(w) = &mut self.wizard {
+                if w.pair_gen != gen {
+                    continue;
+                }
+                match ev {
+                    PairEvent::Phase(phase, peer, error) => {
+                        // 配上过就不再回退：对端离开配对房间不该把门禁重新关上
+                        if phase == PairPhase::Paired {
+                            w.ever_paired = true;
+                        }
+                        w.pair_phase = phase;
+                        w.pair_peer = peer;
+                        w.pair_error = error;
+                    }
+                    PairEvent::Carried(room, token) => {
+                        // 加入端：创建端把房间码与密钥带过来了，直接填上（默认仍是打码显示）
+                        if w.entry == 1 && !room.is_empty() {
+                            w.workspace = room;
+                            w.token = token;
+                        }
+                    }
+                }
+            }
+        }
+        self.sync_pairing();
+        #[cfg(debug_assertions)]
+        if SELFTEST_FRAMES.load(Ordering::Relaxed) > 0 {
+            if SELFTEST_FRAMES.fetch_sub(1, Ordering::Relaxed) == 1 {
+                let phase = self.wizard.as_ref().map(|w| w.pair_phase);
+                std::eprintln!("[selftest] 向导画完 45 帧，配对阶段={:?}，退出", phase);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        // 向导开着就保持重绘：配对状态由线程推进，不重绘界面就不会更新
+        if self.wizard.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
 
         while let Ok(msg) = self.rx.try_recv() {
@@ -2200,6 +2560,9 @@ impl App {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("✕").clicked() {
+                    if let Some(w) = self.wizard.as_mut() {
+                        w.stop_pairing();
+                    }
                     self.wizard = None;
                 }
             });
@@ -2263,6 +2626,29 @@ impl App {
 
         match w.step {
             0 => {
+                // 两个入口，顺序与插件一致：加入在前、创建在后
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(w.entry == 1, "加入已有同步").clicked() && w.entry != 1 {
+                        w.entry = 1;
+                        w.channel.clear();
+                        w.workspace.clear();
+                        w.token.clear();
+                        w.ever_paired = false;
+                        w.stop_pairing();
+                    }
+                    if ui.selectable_label(w.entry == 0, "创建新同步").clicked() && w.entry != 0 {
+                        w.entry = 0;
+                        if w.workspace.trim().is_empty() {
+                            w.workspace = new_room_code();
+                        }
+                        if w.channel.len() != 6 {
+                            w.channel = new_channel();
+                        }
+                        w.ever_paired = false;
+                        w.stop_pairing();
+                    }
+                });
+                ui.add_space(12.0);
                 ui.label(
                     egui::RichText::new("连接到中继服务器")
                         .size(14.0)
@@ -2272,17 +2658,79 @@ impl App {
                 ui.add_space(10.0);
                 relay_fields(ui, &mut w.host, &mut w.port);
                 ui.add_space(10.0);
-                room_field(ui, &mut w.workspace, &mut w.reveal_room);
-                ui.add_space(10.0);
-                field(
-                    ui,
-                    "密钥",
-                    &mut w.token,
-                    "留空则与房间码相同（中继配了房间密钥才需要填）",
-                    true,
+
+                // 通道码：6 位数字，念一遍就能对上；配上之后锁住，别让人改了对不上
+                let locked = w.pairing_done();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("通道码")
+                            .size(12.0)
+                            .color(ui_colors::TEXT_2),
+                    );
+                    if w.entry == 0 && !locked && ui.small_button("换一个").clicked() {
+                        w.channel = new_channel();
+                        w.stop_pairing();
+                    }
+                    if ui.small_button("复制").clicked() {
+                        ui.output_mut(|o| o.copied_text = w.channel.clone());
+                    }
+                });
+                let mut edit = egui::TextEdit::singleline(&mut w.channel)
+                    .hint_text("6 位数字")
+                    .desired_width(160.0)
+                    .char_limit(6)
+                    .font(egui::TextStyle::Monospace);
+                if locked {
+                    edit = edit.interactive(false);
+                }
+                let resp = ui.add(edit);
+                if resp.changed() {
+                    let digits: String = w
+                        .channel
+                        .chars()
+                        .filter(|c| c.is_ascii_digit())
+                        .take(6)
+                        .collect();
+                    if digits != w.channel {
+                        w.channel = digits;
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(if locked {
+                        "配对已完成，通道码锁定；要换一组配置就点「重新配对」"
+                    } else if w.entry == 0 {
+                        "把这 6 位数字告诉对方，让对方填进同一个通道码"
+                    } else {
+                        "填对方给你的 6 位数字；房间码与密钥会自动带过来，不用手抄"
+                    })
+                    .size(11.0)
+                    .color(ui_colors::TEXT_3),
                 );
+
+                ui.add_space(10.0);
+                pair_card(ui, w);
+
+                ui.add_space(10.0);
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("高级：房间码 / 密钥")
+                        .size(12.0)
+                        .color(ui_colors::TEXT_2),
+                )
+                .default_open(false)
+                .show(ui, |ui| {
+                    room_field(ui, &mut w.workspace, &mut w.reveal_room);
+                    ui.add_space(8.0);
+                    field(
+                        ui,
+                        "密钥",
+                        &mut w.token,
+                        "留空则与房间码相同（中继配了房间密钥才需要填）",
+                        true,
+                    );
+                });
+
                 if let Some(t) = self.settings.tasks.first() {
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
                     if ui
                         .button(format!("沿用「{}」的连接", t.display_name()))
                         .clicked()
@@ -2395,8 +2843,13 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if w.step == 0 {
-                    if ui.button("连接 NAS 设备").clicked() {
-                        w.note = "通过自建中继连接，请直接填写上面三项".into();
+                    // 配对没过就把原因写在按钮旁边，而不是只把按钮变灰
+                    if !w.pairing_done() {
+                        ui.label(
+                            egui::RichText::new("先配对通过才能继续")
+                                .size(11.0)
+                                .color(ui_colors::TEXT_3),
+                        );
                     }
                     if !w.note.is_empty() {
                         ui.label(
@@ -2411,15 +2864,26 @@ impl App {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let last = w.step == 2;
+                    let gate = w.step == 0 && !w.pairing_done();
                     let btn = egui::Button::new(
-                        egui::RichText::new(if last { "创建任务" } else { "下一步" })
-                            .size(13.0)
-                            .color(egui::Color32::WHITE),
+                        egui::RichText::new(if last {
+                            "创建任务"
+                        } else if gate {
+                            "下一步（待配对）"
+                        } else {
+                            "下一步"
+                        })
+                        .size(13.0)
+                        .color(egui::Color32::WHITE),
                     )
-                    .fill(ui_colors::PRIMARY)
+                    .fill(if gate {
+                        ui_colors::PRIMARY_DIM
+                    } else {
+                        ui_colors::PRIMARY
+                    })
                     .rounding(egui::Rounding::same(6.0))
                     .min_size(egui::vec2(104.0, 32.0));
-                    if ui.add(btn).clicked() {
+                    if ui.add_enabled(!gate, btn).clicked() {
                         if last {
                             let task = w.to_task();
                             if task.issues().is_empty() {
@@ -2438,10 +2902,97 @@ impl App {
 
         if let Some(t) = finish {
             self.add_task(t);
+            if let Some(w) = self.wizard.as_mut() {
+                w.stop_pairing();
+            }
             self.wizard = None;
         } else if cancel {
+            if let Some(w) = self.wizard.as_mut() {
+                w.stop_pairing();
+            }
             self.wizard = None;
         }
+    }
+}
+
+/// 配对卡片：文案与插件同一套（状态 + 一句原因 + 配对房间名 + 重新配对）。
+fn pair_card(ui: &mut egui::Ui, w: &mut Wizard) {
+    let phase = w.pair_phase;
+    let sticky = w.ever_paired && phase != PairPhase::Denied;
+    let (mark, tone) = match phase {
+        PairPhase::Paired => ("✓", ui_colors::SUCCESS),
+        PairPhase::Waiting | PairPhase::Connecting if sticky => ("✓", ui_colors::SUCCESS),
+        PairPhase::Waiting | PairPhase::Connecting => ("⏳", ui_colors::WARN),
+        PairPhase::Denied | PairPhase::Unreachable => ("✗", ui_colors::DANGER),
+        PairPhase::Idle => ("·", ui_colors::TEXT_3),
+    };
+
+    egui::Frame::none()
+        .fill(ui_colors::CARD)
+        .stroke(egui::Stroke::new(0.5_f32, ui_colors::BORDER))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(12.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{mark} {}", phase.title(w.ever_paired)))
+                        .size(13.0)
+                        .strong()
+                        .color(tone),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("重新配对").clicked() {
+                        w.ever_paired = false;
+                        w.pair_phase = PairPhase::Idle;
+                        w.stop_pairing();
+                    }
+                });
+            });
+            ui.label(
+                egui::RichText::new(pair_hint(w))
+                    .size(11.0)
+                    .color(ui_colors::TEXT_3),
+            );
+            if !w.channel.trim().is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("配对房间 {}::pair", w.channel.trim()))
+                        .size(11.0)
+                        .color(ui_colors::TEXT_3)
+                        .monospace(),
+                );
+            }
+        });
+}
+
+fn pair_hint(w: &Wizard) -> String {
+    match w.pair_phase {
+        PairPhase::Paired => {
+            "两端已经在中继里互相看见，可以继续；任务建好后会自动开始同步。".into()
+        }
+        PairPhase::Waiting if w.ever_paired => {
+            "已经配过对，门禁不再拦；对端这会儿不在配对房间是正常的。".into()
+        }
+        PairPhase::Waiting => {
+            "这个配对房间现在只有你一端。让对方在通道码里填同一个 6 位数字。".into()
+        }
+        PairPhase::Connecting => "后台正在连中继，一两秒后会有结果。".into(),
+        PairPhase::Denied => {
+            let said = w.pair_error.trim();
+            if said.is_empty() {
+                "中继拒绝了配对通道。".into()
+            } else {
+                format!("中继回的是「{said}」。")
+            }
+        }
+        PairPhase::Unreachable => {
+            let said = w.pair_error.trim();
+            if said.is_empty() {
+                "连不上中继：检查地址与端口。".into()
+            } else {
+                said.to_string()
+            }
+        }
+        PairPhase::Idle => "填好中继地址与 6 位通道码会自动开始配对。".into(),
     }
 }
 
@@ -2603,6 +3154,12 @@ fn short_room(room: &str) -> String {
 /// 房间码：`k` + 32 位十六进制，和 dsh 插件生成的同构——32 位随机、猜不到就是门禁。
 fn new_room_code() -> String {
     format!("k{}", uuid::Uuid::new_v4().simple())
+}
+
+/// 6 位通道码：只负责在配对房间里「见面」，念一遍就能对上（与插件同一规则）。
+fn new_channel() -> String {
+    let n = uuid::Uuid::new_v4().as_u128() % 1_000_000;
+    format!("{n:06}")
 }
 
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, password: bool) {
@@ -2792,4 +3349,56 @@ fn civil(z: i64) -> (i32, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     ((y + if m <= 2 { 1 } else { 0 }) as i32, m, d)
+}
+
+#[cfg(test)]
+mod pair_tests {
+    use super::*;
+
+    /// 创建端把「房间码|密钥」挂在 device id 上，加入端要能原样解出来。
+    #[test]
+    fn announce_roundtrip() {
+        let room = "k0123456789abcdef0123456789abcdef";
+        let payload = format!("{room}|secret");
+        let device = format!("gui-abc~{}", hex_of(&payload));
+        assert_eq!(
+            parse_announce(&device),
+            Some((room.to_string(), "secret".to_string()))
+        );
+        // 加入端没有载荷、或者半截的十六进制，都不该解出东西
+        assert_eq!(parse_announce("gui-abc"), None);
+        assert_eq!(parse_announce("gui-abc~zz"), None);
+    }
+
+    #[test]
+    fn server_split_compose() {
+        assert_eq!(
+            split_server("ws://10.90.45.64:10023/ws"),
+            ("10.90.45.64".to_string(), "10023".to_string())
+        );
+        assert_eq!(
+            split_server("wss://sync.example.com/ws"),
+            ("sync.example.com".to_string(), String::new())
+        );
+        assert_eq!(compose_server("10.90.45.64", "10023"), "ws://10.90.45.64:10023/ws");
+        assert_eq!(compose_server("10.90.45.64", ""), "ws://10.90.45.64:8443/ws");
+        assert_eq!(compose_server("", "10023"), "");
+    }
+
+    #[test]
+    fn channel_is_six_digits() {
+        for _ in 0..64 {
+            let c = new_channel();
+            assert_eq!(c.len(), 6, "{c}");
+            assert!(c.chars().all(|ch| ch.is_ascii_digit()), "{c}");
+        }
+    }
+
+    #[test]
+    fn room_code_shape() {
+        let code = new_room_code();
+        assert!(code.starts_with('k'));
+        assert_eq!(code.len(), 33);
+        assert!(code[1..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }
