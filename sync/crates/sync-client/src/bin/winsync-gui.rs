@@ -847,9 +847,15 @@ fn setup_style(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
     v.panel_fill = ui_colors::APP;
     v.window_fill = ui_colors::CARD;
-    v.extreme_bg_color = ui_colors::CARD;
+    // 输入框底色比卡片再暗一档：深色面板上一排浅色方块太扎眼
+    v.extreme_bg_color = egui::Color32::from_rgb(0x14, 0x15, 0x17);
     v.faint_bg_color = ui_colors::CARD;
-    v.override_text_color = Some(ui_colors::TEXT);
+    // 不用 override_text_color：它会把占位提示也刷成正文色，输入框看着像「已经填满了」。
+    // 改成各状态自己的文字色，hint 由 egui 自动取暗色。
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, ui_colors::TEXT);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, ui_colors::TEXT);
+    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, ui_colors::TEXT);
+    v.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, ui_colors::TEXT);
     v.hyperlink_color = ui_colors::PRIMARY;
     v.selection.bg_fill = ui_colors::PRIMARY_DIM;
     v.widgets.noninteractive.bg_fill = ui_colors::CARD;
@@ -1270,8 +1276,12 @@ impl App {
         self.settings.tasks.get(self.selected)
     }
 
-    fn apply_buf(&mut self) {
-        if let Some(t) = self.settings.tasks.get_mut(self.selected) {
+    /// 把编辑缓冲写回第 `i` 个任务。
+    ///
+    /// 以前这里写死 `self.selected`：从「⋯ → 设置」打开某个非选中任务时，
+    /// 保存会把内容写进另一个任务。参数化之后调用方必须说清是哪个。
+    fn apply_buf_at(&mut self, i: usize) {
+        if let Some(t) = self.settings.tasks.get_mut(i) {
             self.buf.apply_to(t);
         }
     }
@@ -1280,7 +1290,9 @@ impl App {
         if i >= self.settings.tasks.len() {
             return;
         }
-        self.apply_buf();
+        // 切走之前先把上一个任务的编辑落盘
+        let prev = self.selected;
+        self.apply_buf_at(prev);
         self.selected = i;
         self.buf = EditBuf::from_task(&self.settings.tasks[i]);
         self.records_loaded = false;
@@ -1312,6 +1324,10 @@ impl App {
         self.select(idx);
         self.tab = Tab::Tasks;
         self.log(idx, "任务已创建");
+        // 建好就同步一次：插件也是这样，否则用户以为「配对完就该在传」，实际什么都没发生
+        if self.settings.tasks[idx].issues().is_empty() {
+            self.start_sync(idx);
+        }
     }
 
     fn remove_task(&mut self, i: usize) {
@@ -1363,12 +1379,19 @@ impl App {
             return;
         }
         if i == self.selected {
-            self.apply_buf();
+            self.apply_buf_at(i);
         }
         let cfg = self.settings.tasks[i].clone();
         let issues = cfg.issues();
         if !issues.is_empty() {
-            self.log(i, format!("无法同步：{}", issues.join("；")));
+            // 只写日志的话卡片上什么都不显示，用户只会说「点了没反应」。
+            // 记成失败状态，卡片上就有红字原因了。
+            let reason = format!("无法同步：{}", issues.join("；"));
+            self.log(i, reason.clone());
+            if let Some(rt) = self.runtimes.get_mut(i) {
+                rt.last = Some(Err(reason));
+                rt.last_time = Some(now_stamp());
+            }
             return;
         }
         let _ = self.settings.save();
@@ -1966,6 +1989,9 @@ impl App {
                                     (ui_colors::WARN, "同步中…")
                                 } else if task.paused {
                                     (ui_colors::TEXT_3, "已暂停")
+                                } else if !task.issues().is_empty() {
+                                    // 配置不完整时「等待同步」是假象：同步按钮根本点不了
+                                    (ui_colors::DANGER, "配置不完整")
                                 } else if matches!(last, Some(Err(_))) {
                                     (ui_colors::DANGER, "同步失败")
                                 } else if last.is_some() {
@@ -2739,6 +2765,23 @@ impl App {
                     );
                 }
 
+                // 配置不完整时把具体原因列出来：否则「保存」看着能点、点完却没动静
+                let live_issues = {
+                    let mut probe = self.settings.tasks[i].clone();
+                    self.buf.apply_to(&mut probe);
+                    probe.issues()
+                };
+                if !live_issues.is_empty() {
+                    ui.add_space(10.0);
+                    for issue in &live_issues {
+                        ui.label(
+                            egui::RichText::new(format!("· {issue}"))
+                                .size(11.0)
+                                .color(ui_colors::DANGER),
+                        );
+                    }
+                }
+
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     let btn = egui::Button::new(
@@ -2748,7 +2791,14 @@ impl App {
                     .rounding(egui::Rounding::same(6.0))
                     .min_size(egui::vec2(80.0, 30.0));
                     if ui.add(btn).clicked() {
-                        self.apply_buf();
+                        self.apply_buf_at(i);
+                        // 目录不存在就先建（与新建任务一致）：否则「同步目录不存在」会一直
+                        // 卡着保存，任务也就永远「立即同步」点不了——用户只看到一句「配置不完整」。
+                        if let Some(t) = self.settings.tasks.get(i) {
+                            if !t.root.is_empty() && !std::path::Path::new(&t.root).is_dir() {
+                                let _ = std::fs::create_dir_all(&t.root);
+                            }
+                        }
                         let issues = self
                             .settings
                             .tasks
@@ -2764,7 +2814,8 @@ impl App {
                                 Err(e) => self.log(i, format!("保存失败: {e}")),
                             }
                         } else {
-                            self.saved_hint = Some("未保存：配置不完整".into());
+                            // 把到底差哪几项写出来，别再只说「配置不完整」
+                            self.saved_hint = Some(format!("未保存：{}", issues.join("；")));
                         }
                     }
                     if ui
