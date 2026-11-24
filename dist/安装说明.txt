@@ -65,6 +65,13 @@ WinSync / dsh-winsync 发布包（2026-11-24，插件 0.9.0 / 中继 0.6）
     · 房间码（32 位随机）与密钥收在「高级：房间码 / 密钥」里，默认打码，由配对通道自动带给对方
   任务卡上的进度条按字节走，右边是实时速率（↑ 上传 / ↓ 下载）。
 
+  图形后端（Windows Server 2019 / 远程桌面重点看这一条）：
+    · 默认走 DirectX 12（wgpu）；机器上没有显卡时用 WARP 软件光栅，不再依赖 OpenGL 2.0，
+      所以 Server 2019 / RDP 里不会再「双击就崩」。
+    · 想看这次用的是哪个后端：%LOCALAPPDATA%\WinSync\gui.log（每次启动写一行，带适配器名）。
+    · 想强制换：set WINSYNC_RENDERER=glow  或  set WINSYNC_RENDERER=wgpu  再启动。
+    · 两个后端都起不来：弹框说明并写 %LOCALAPPDATA%\WinSync\gui-error.log，不会静默闪退。
+
 六、文件
   dsh-winsync-0.9.0.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
   winsync-relay-0.6.tar.gz     中继镜像（Linux/amd64，docker load -i 导入；1.2 MB，无基础镜像）

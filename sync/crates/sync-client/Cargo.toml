@@ -17,8 +17,15 @@ uuid.workspace = true
 serde_json.workspace = true
 notify.workspace = true
 
-# 图形界面：eframe + glow（OpenGL 后端，比 wgpu 编译快、体积小）
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+# 图形界面：eframe。**必须同时带 glow 与 wgpu**——
+# Windows Server 2019 / RDP 会话里往往没有 OpenGL 2.0 的 ICD（只有 GDI 的 GL 1.1），
+# glow 会在创建上下文时直接失败、进程启动即崩；wgpu 走 DirectX 12，没有显卡时能退到
+# WARP 软件光栅，所以在服务器上是唯一能跑的后端。默认 wgpu，失败再退 glow。
+eframe = { version = "0.29", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wgpu",
+] }
 # 选择文件夹的系统对话框
 rfd = "0.15"
 # 系统托盘图标与右键菜单
