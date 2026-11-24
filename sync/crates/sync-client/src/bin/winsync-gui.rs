@@ -339,8 +339,13 @@ impl EditBuf {
     fn apply_to(&self, t: &mut Config) {
         t.name = self.name.trim().to_string();
         t.server = compose_server(&self.host, &self.port);
-        t.token = self.token.trim().to_string();
         t.workspace = self.workspace.trim().to_string();
+        // 密钥留空 = 跟随房间码，与新建流程保持同一语义
+        t.token = if self.token.trim().is_empty() {
+            t.workspace.clone()
+        } else {
+            self.token.trim().to_string()
+        };
         t.root = self.root.trim().to_string();
         t.mode = self.mode;
         t.filter = self.filter();
@@ -428,12 +433,12 @@ impl Wizard {
             id: new_id(),
             name: self.name.trim().to_string(),
             server: compose_server(&self.host, &self.port),
-            token: self.token.trim().to_string(),
-            workspace: if self.workspace.trim().is_empty() {
-                "default".into()
-            } else {
-                self.workspace.trim().to_string()
-            },
+            // 密钥留空 = 跟随房间码（与插件同一语义）。这里要**真的写进去**：
+            // Config::issues() 要求 token 非空，留空会让「创建任务」永远点不了。
+            token: String::new(),
+            // 房间码不再兜底成 "default"：加入端没等到对端把配置带过来时，
+            // 静默用 default 会建出一个连不上任何人的任务，不如直接拦住并说明。
+            workspace: self.workspace.trim().to_string(),
             root: self.root.trim().to_string(),
             mode: self.mode,
             filter: Filter {
@@ -449,6 +454,9 @@ impl Wizard {
             },
             paused: false,
         };
+        if t.token.trim().is_empty() {
+            t.token = t.workspace.clone();
+        }
         if t.name.is_empty() {
             t.name = t.display_name();
         }
@@ -2987,6 +2995,18 @@ impl App {
 
                 ui.add_space(10.0);
                 pair_card(ui, w);
+                // 加入端配上对了、房间码却还是空的：说明对端的配置没带过来（对端可能也在「加入」）
+                if w.entry == 1 && w.pairing_done() && w.workspace.trim().is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "房间码还没到：让对方用「创建新同步」在同一个通道码里再配一次，\
+                             或展开下面的高级配置手动填。",
+                        )
+                        .size(11.0)
+                        .color(ui_colors::WARN),
+                    );
+                }
 
                 ui.add_space(10.0);
                 egui::CollapsingHeader::new(
@@ -3078,8 +3098,8 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut w.root)
-                            .hint_text(r"D:\Sync")
-                            .desired_width(420.0),
+                            .hint_text("选目录，或直接粘贴路径")
+                            .desired_width(330.0),
                     );
                     if ui.button("浏览…").clicked() {
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -3129,13 +3149,6 @@ impl App {
                                 .color(ui_colors::TEXT_3),
                         );
                     }
-                    if !w.note.is_empty() {
-                        ui.label(
-                            egui::RichText::new(&w.note)
-                                .size(11.0)
-                                .color(ui_colors::WARN),
-                        );
-                    }
                 } else if ui.button("上一步").clicked() {
                     w.step -= 1;
                 }
@@ -3164,8 +3177,20 @@ impl App {
                     if ui.add_enabled(!gate, btn).clicked() {
                         if last {
                             let task = w.to_task();
-                            if task.issues().is_empty() {
+                            // 目录不存在就先建出来（与插件一致：新建任务时自动创建），
+                            // 建不出来再由 issues() 拦住并说明。手打路径才不会白填一遍。
+                            if !task.root.is_empty()
+                                && !std::path::Path::new(&task.root).is_dir()
+                            {
+                                let _ = std::fs::create_dir_all(&task.root);
+                            }
+                            let issues = task.issues();
+                            if issues.is_empty() {
                                 finish = Some(task);
+                            } else {
+                                // 以前这里是「什么都不发生」，用户只能猜。
+                                // 现在把还差哪几项直接写在按钮旁边。
+                                w.note = format!("还差 {} 项：{}", issues.len(), issues.join("；"));
                             }
                         } else {
                             w.step += 1;
@@ -3173,6 +3198,13 @@ impl App {
                     }
                     if ui.button("取消").clicked() {
                         cancel = true;
+                    }
+                    if !w.note.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&w.note)
+                                .size(11.0)
+                                .color(ui_colors::WARN),
+                        );
                     }
                 });
             });
@@ -3670,6 +3702,23 @@ mod pair_tests {
             assert_eq!(c.len(), 6, "{c}");
             assert!(c.chars().all(|ch| ch.is_ascii_digit()), "{c}");
         }
+    }
+
+    /// 创建端的密钥留空 = 跟随房间码；否则 Config::issues() 会一直拦着「创建任务」。
+    #[test]
+    fn creator_token_follows_room_code() {
+        let mut w = Wizard::new(None);
+        w.host = "10.90.45.64".into();
+        w.port = "10023".into();
+        w.root = std::env::temp_dir().to_string_lossy().to_string();
+        w.token = String::new();
+        let t = w.to_task();
+        assert_eq!(t.token, t.workspace, "密钥留空应当跟随房间码");
+        assert!(
+            t.issues().is_empty(),
+            "地址与目录都填好之后不该再有 issue：{:?}",
+            t.issues()
+        );
     }
 
     #[test]

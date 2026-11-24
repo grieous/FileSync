@@ -177,7 +177,7 @@ impl Config {
         }
 
         if self.token.trim().is_empty() {
-            v.push("未填写密钥（中继为每个房间配的那把，见 rooms.json）".into());
+            v.push("未填写密钥（留空应跟随房间码；只有中继配了房间密钥时才需要单独填）".into());
         }
         if self.workspace.trim().is_empty() {
             v.push("未填写房间名（两台设备必须相同）".into());
