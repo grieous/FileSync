@@ -23,9 +23,18 @@ fn encode(event: Event) -> SseEvent {
             done,
             total,
             what,
+            up_bps,
+            down_bps,
         } => SseEvent::default().event("progress").data(
-            serde_json::json!({ "task": task, "done": done, "total": total, "what": what })
-                .to_string(),
+            serde_json::json!({
+                "task": task,
+                "done": done,
+                "total": total,
+                "what": what,
+                "up_bps": up_bps,
+                "down_bps": down_bps,
+            })
+            .to_string(),
         ),
         Event::Done {
             task,

@@ -56,7 +56,17 @@ const state = {
       paused: false,
       has_token: true,
       issues: [],
-      runtime: { running: true, progress: { done: 12, total: 40, what: 'design.fig' } },
+      runtime: {
+        running: true,
+        // 字节口径：1.2 GB 传了 0.8 GB，上行 12.4 MB/s
+        progress: {
+          done: 858993459,
+          total: 1288490189,
+          what: 'design/源文件/品牌手册-2026-终稿.fig',
+          up_bps: 13002342,
+          down_bps: 0,
+        },
+      },
     },
   ],
 }

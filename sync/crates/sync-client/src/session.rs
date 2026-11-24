@@ -38,7 +38,68 @@ pub type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[derive(Debug, Clone)]
 pub enum Event {
     Log(String),
-    Progress { done: u64, total: u64, what: String },
+    /// `done`/`total` 是**字节**（早期版本这里是「第几个文件」，单个大文件永远停在 0/1）；
+    /// `up_bps`/`down_bps` 是最近一个窗口的实测速率，界面拿它显示实时网速。
+    Progress {
+        done: u64,
+        total: u64,
+        what: String,
+        up_bps: u64,
+        down_bps: u64,
+    },
+}
+
+/// 进度事件最短间隔：一个 2 GB 文件按 64 KB 分块有 3 万多块，
+/// 每块发一条事件会把 SSE 和界面都打满，200ms 一条够看了。
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+/// 多久没有数据就把速率归零——否则传完之后界面上会一直挂着最后一刻的「2.4 MB/s」。
+const RATE_IDLE: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// 单向速率的滑动估算：窗口内累计字节 / 窗口时长。
+struct Meter {
+    at: std::time::Instant,
+    bytes: u64,
+    bps: u64,
+}
+
+impl Default for Meter {
+    fn default() -> Self {
+        Self {
+            at: std::time::Instant::now(),
+            bytes: 0,
+            bps: 0,
+        }
+    }
+}
+
+impl Meter {
+    /// 记 `n` 字节。窗口到了就结算一次速率并返回 true（表示「该发事件了」）。
+    fn add(&mut self, n: u64) -> bool {
+        self.bytes += n;
+        let elapsed = self.at.elapsed();
+        if elapsed >= PROGRESS_INTERVAL {
+            self.bps = (self.bytes as f64 / elapsed.as_secs_f64()).round() as u64;
+            self.bytes = 0;
+            self.at = std::time::Instant::now();
+            return true;
+        }
+        false
+    }
+
+    fn rate(&mut self) -> u64 {
+        if self.at.elapsed() >= RATE_IDLE {
+            self.bps = 0;
+        }
+        self.bps
+    }
+}
+
+/// 当前正在传的那个文件的光标（字节口径）。
+#[derive(Clone)]
+struct Cursor {
+    what: String,
+    done: u64,
+    total: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -115,6 +176,11 @@ struct Session {
     limits: Limits,
     up_rate: RateState,
     down_rate: RateState,
+    /// 实时速率（与限速用的 RateState 分开：那个是「欠了多少令牌」，这个是「实际多快」）
+    up_meter: Meter,
+    down_meter: Meter,
+    /// 当前正在传的文件，用来把速率和文件名一起发出去
+    cursor: Option<Cursor>,
 }
 
 impl Session {
@@ -128,9 +194,36 @@ impl Session {
         }
     }
 
-    fn progress(&self, done: u64, total: u64, what: String) {
+    /// 立即发一条进度（切文件、开始传的时候用，让界面马上换名字）。
+    fn flush_progress(&mut self) {
+        let Some(cur) = self.cursor.clone() else { return };
+        let up = self.up_meter.rate();
+        let down = self.down_meter.rate();
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Event::Progress { done, total, what });
+            let _ = tx.send(Event::Progress {
+                done: cur.done,
+                total: cur.total,
+                what: cur.what,
+                up_bps: up,
+                down_bps: down,
+            });
+        }
+    }
+
+    /// 传（或收）了一块：更新游标与速率，到节流窗口就发一条事件。
+    fn on_bytes(&mut self, up: bool, what: &str, done: u64, total: u64, n: u64) {
+        let due = if up {
+            self.up_meter.add(n)
+        } else {
+            self.down_meter.add(n)
+        };
+        self.cursor = Some(Cursor {
+            what: what.to_string(),
+            done,
+            total,
+        });
+        if due {
+            self.flush_progress();
         }
     }
 
@@ -373,9 +466,19 @@ impl Session {
 
     /// 推送一批文件。对端不接受就跳过（由对端自己决定）。
     async fn push_entries(&mut self, entries: &[IndexEntry]) -> Result<()> {
-        let total = entries.len() as u64;
+        let total_files = entries.len() as u64;
         for (i, e) in entries.iter().enumerate() {
-            self.progress(i as u64, total, e.path.clone());
+            // 按字节报进度：`total` 是这个文件多大，不是「一共几个文件」。
+            // 原来按文件个数报，单个大文件永远停在 0/1，界面上等于没有进度条。
+            self.cursor = Some(Cursor {
+                what: e.path.clone(),
+                done: 0,
+                total: e.size,
+            });
+            self.flush_progress();
+            if total_files > 1 {
+                self.emit(format!("[{}/{}] {}", i + 1, total_files, e.path));
+            }
 
             if e.is_dir() {
                 self.send(Msg::Mkdir {
@@ -412,6 +515,7 @@ impl Session {
             }
 
             // 发块过程中文件可能被改，大小对不上就按实际读到的发
+            let mut sent = 0u64;
             for idx in 0..cc {
                 let data = read_chunk(&full, idx)
                     .with_context(|| format!("读取 {} 第 {idx} 块", e.path))?;
@@ -421,11 +525,14 @@ impl Session {
                     total: cc,
                     blake3: e.blake3.clone(),
                 };
-                self.report.bytes_sent += data.len() as u64;
-                let n = data.len();
+                let n = data.len() as u64;
+                self.report.bytes_sent += n;
                 self.send_frame(Frame::Chunk(h, data)).await?;
+                sent += n;
+                // 进度按实际发出去的字节算；文件中途变大时把总量一起抬高，别让进度超过 100%
+                self.on_bytes(true, &e.path, sent, e.size.max(sent), n);
                 let kbps = self.limits.up_kbps;
-                throttle(&mut self.up_rate, n, kbps).await;
+                throttle(&mut self.up_rate, n as usize, kbps).await;
             }
 
             self.send(Msg::FileDone {
@@ -458,6 +565,8 @@ impl Session {
     /// 接收阶段：一直处理到对方发来 PushDone。
     async fn receive_phase(&mut self, conflicts: &HashSet<String>) -> Result<()> {
         let mut incoming: HashMap<String, IncomingFile> = HashMap::new();
+        // 每个在收的文件：(已收字节, 声明大小)。FileOffer 里带 size，拿它做分母。
+        let mut recv_cur: HashMap<String, (u64, u64)> = HashMap::new();
 
         loop {
             let frame = self.recv_timeout(600).await?;
@@ -465,11 +574,17 @@ impl Session {
             match frame {
                 Frame::Chunk(h, data) => {
                     if let Some(f) = incoming.get_mut(&h.path) {
-                        self.report.bytes_recv += data.len() as u64;
-                        let n = data.len();
+                        let n = data.len() as u64;
+                        self.report.bytes_recv += n;
                         f.write_chunk(&data)?;
+                        // 先记账再发事件，界面上的「已收 / 总量」才跟着动
+                        if let Some((done, total)) = recv_cur.get_mut(&h.path) {
+                            *done += n;
+                            let (d, t) = (*done, *total);
+                            self.on_bytes(false, &h.path, d, t, n);
+                        }
                         let kbps = self.limits.down_kbps;
-                        throttle(&mut self.down_rate, n, kbps).await;
+                        throttle(&mut self.down_rate, n as usize, kbps).await;
                     }
                 }
 
@@ -493,8 +608,8 @@ impl Session {
                     Msg::FileOffer {
                         path,
                         blake3,
+                        size,
                         chunk_count,
-                        ..
                     } => {
                         // 冲突文件：先把本地版本改名保留，再让它被对端版本覆盖
                         if conflicts.contains(&path) {
@@ -503,6 +618,14 @@ impl Session {
                         match IncomingFile::create(&self.root, &path) {
                             Ok(f) => {
                                 incoming.insert(path.clone(), f);
+                                // 收之前就把分母挂上，第一块到达时进度条立刻有值
+                                recv_cur.insert(path.clone(), (0, size));
+                                self.cursor = Some(Cursor {
+                                    what: path.clone(),
+                                    done: 0,
+                                    total: size,
+                                });
+                                self.flush_progress();
                                 self.send(Msg::FileRequest {
                                     path,
                                     blake3,
@@ -524,29 +647,23 @@ impl Session {
                     }
 
                     Msg::FileDone { path, blake3 } => match incoming.remove(&path) {
-                        Some(f) => match f.finish(&blake3) {
-                            Ok(()) => {
-                                self.report.pulled += 1;
-                                self.pulled_ok.insert(path.clone());
-                                self.note(&path, "下载", true, "");
-                                self.send(Msg::FileAck {
-                                    path,
-                                    blake3,
-                                    ok: true,
-                                })
-                                .await?;
-                            }
-                            Err(e) => {
-                                self.emit(format!("落地失败 {path}: {e}"));
-                                self.note(&path, "下载", false, &format!("落地失败: {e}"));
-                                self.send(Msg::FileAck {
-                                    path,
-                                    blake3,
-                                    ok: false,
-                                })
-                                .await?;
-                            }
-                        },
+                        Some(f) => {
+                            recv_cur.remove(&path);
+                            let ok = match f.finish(&blake3) {
+                                Ok(()) => {
+                                    self.report.pulled += 1;
+                                    self.pulled_ok.insert(path.clone());
+                                    self.note(&path, "下载", true, "");
+                                    true
+                                }
+                                Err(e) => {
+                                    self.emit(format!("落地失败 {path}: {e}"));
+                                    self.note(&path, "下载", false, &format!("落地失败: {e}"));
+                                    false
+                                }
+                            };
+                            self.send(Msg::FileAck { path, blake3, ok }).await?;
+                        }
                         None => {
                             self.send(Msg::FileAck {
                                 path,
@@ -730,6 +847,9 @@ pub async fn run(
         limits,
         up_rate: RateState::default(),
         down_rate: RateState::default(),
+        up_meter: Meter::default(),
+        down_meter: Meter::default(),
+        cursor: None,
     };
 
     sess.send(Msg::Hello {

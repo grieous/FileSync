@@ -37,9 +37,15 @@ pub struct BootInfo {
 /// 一次同步的进度（SSE 与 state 共用）。
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressView {
+    /// 已传字节。早期这里是「第几个文件」，单个大文件永远停在 0/1，界面上等于没有进度。
     pub done: u64,
     pub total: u64,
     pub what: String,
+    /// 实时速率（字节/秒）。1.2 秒没数据在会话层就归零，快照里再兜一次底。
+    #[serde(default)]
+    pub up_bps: u64,
+    #[serde(default)]
+    pub down_bps: u64,
 }
 
 /// `session::Report` 的可序列化映射。
@@ -93,6 +99,8 @@ pub enum Event {
         done: u64,
         total: u64,
         what: String,
+        up_bps: u64,
+        down_bps: u64,
     },
     Done {
         task: String,
@@ -228,7 +236,15 @@ impl TaskView {
             issues: cfg.issues(),
             runtime: RuntimeView {
                 running: rt.running,
-                progress: rt.progress.clone(),
+                // 传完之后 last_progress_emit 就不再更新：超过 3 秒就把速率清零，
+                // 免得界面上一直挂着「↑ 2.4 MB/s」这种僵尸数字
+                progress: rt.progress.clone().map(|mut p| {
+                    if rt.last_progress_emit.elapsed() >= std::time::Duration::from_secs(3) {
+                        p.up_bps = 0;
+                        p.down_bps = 0;
+                    }
+                    p
+                }),
                 last: rt.last.clone(),
                 last_error: rt.last_error.clone(),
                 last_time: rt.last_time,

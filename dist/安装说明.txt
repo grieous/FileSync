@@ -1,7 +1,7 @@
-WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.6 / 中继 0.6）
+WinSync / dsh-winsync 发布包（2026-11-24，插件 0.9.0 / 中继 0.6）
 
 一、只装 dsh 插件（Windows，推荐）
-  dsh plugin --profile desktop add "本目录\dsh-winsync-0.8.6.tgz"
+  dsh plugin --profile desktop add "本目录\dsh-winsync-0.9.0.tgz"
   重启 dsh → 左侧栏「文件同步」。
   插件包里自带 daemon（bin/winsync-daemon.exe.gz，首次运行展开到
   %LOCALAPPDATA%\dsh-winsync\bin），不需要另外放文件。
@@ -55,7 +55,7 @@ WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.6 / 中继 0.6）
      再在中继上 `docker logs -f winsync-relay` 看「加入 / 配对成功 / 房间已满」。
 
 五、文件
-  dsh-winsync-0.8.6.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
+  dsh-winsync-0.9.0.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
   winsync-relay-0.6.tar.gz     中继镜像（Linux/amd64，docker load -i 导入；1.2 MB，无基础镜像）
   Dockerfile.relay             上面那个镜像的「一条命令重建」版（FROM scratch + 静态二进制，3 秒）
   winsync-relay-linux-amd64    中继的静态 Linux 二进制（不装 Docker 也能直接跑）

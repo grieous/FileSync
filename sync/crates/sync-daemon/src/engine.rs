@@ -80,7 +80,13 @@ fn drain_worker(state: &Arc<AppState>, rx: &mut WorkerRx) {
                     }
                     state.emit(Event::Log { task, line });
                 }
-                sync_client::Event::Progress { done, total, what } => {
+                sync_client::Event::Progress {
+                    done,
+                    total,
+                    what,
+                    up_bps,
+                    down_bps,
+                } => {
                     let mut emit = false;
                     if let Ok(mut inner) = state.inner.lock() {
                         if let Some(i) = inner.index_of(&task) {
@@ -89,6 +95,8 @@ fn drain_worker(state: &Arc<AppState>, rx: &mut WorkerRx) {
                                 done,
                                 total,
                                 what: what.clone(),
+                                up_bps,
+                                down_bps,
                             });
                             if rt.last_progress_emit.elapsed() >= PROGRESS_EVERY {
                                 rt.last_progress_emit = Instant::now();
@@ -102,6 +110,8 @@ fn drain_worker(state: &Arc<AppState>, rx: &mut WorkerRx) {
                             done,
                             total,
                             what,
+                            up_bps,
+                            down_bps,
                         });
                     }
                 }

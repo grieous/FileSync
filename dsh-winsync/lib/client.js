@@ -508,6 +508,24 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 字节 → 人话。进度条上的「已传 / 总量」与实时速率共用一套，
+     * 免得同一个数字在卡片和提示里换算出两种写法。
+     */
+    function fmtBytes(value) {
+      const n = Number(value) || 0
+      if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`
+      if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`
+      if (n >= 1024) return `${Math.round(n / 1024)} KB`
+      return `${Math.round(n)} B`
+    }
+
+    /** 速率：0 就是空串，界面上一格都不占 */
+    function fmtRate(bps) {
+      const n = Number(bps) || 0
+      return n > 0 ? `${fmtBytes(n)}/s` : ''
+    }
+
+    /**
      * 邀请串 = 中继地址 + 房间名 + 密钥，和 daemon 真正连的那条地址同构：
      * `ws://host:port/ws?workspace=<房间>&token=<密钥>`。
      *
@@ -679,7 +697,13 @@ window.__ModuleLoader__.load({
             patchRuntime(payload.task, (rt) => ({
               ...rt,
               running: true,
-              progress: { done: payload.done, total: payload.total, what: payload.what },
+              progress: {
+                done: payload.done,
+                total: payload.total,
+                what: payload.what,
+                up_bps: payload.up_bps ?? 0,
+                down_bps: payload.down_bps ?? 0,
+              },
             }))
           })
           source.addEventListener('done', (event) => {
@@ -789,7 +813,10 @@ window.__ModuleLoader__.load({
       const status = statusOf(task)
       const rt = task.runtime ?? {}
       const progress = rt.progress
-      const frac = progress && progress.total > 0 ? progress.done / progress.total : 0
+      const frac = progress && progress.total > 0 ? Math.min(1, progress.done / progress.total) : 0
+      const upRate = fmtRate(progress?.up_bps)
+      const downRate = fmtRate(progress?.down_bps)
+      const speed = [upRate ? `↑ ${upRate}` : '', downRate ? `↓ ${downRate}` : ''].filter(Boolean).join('   ')
       const canSync = !rt.running && (task.issues ?? []).length === 0
 
       return h(
@@ -849,10 +876,35 @@ window.__ModuleLoader__.load({
                 { className: 'ws-progress' },
                 h('i', { style: { width: `${Math.round(frac * 100)}%` } }),
               ),
+              // 一行里放三样：进度百分比 + 字节数 + 实时速率。文件名太长就省略，
+              // 不能让一行被一个长路径顶成三行（这个面板本来就窄）。
               h(
                 'div',
-                { className: 'ws-sub', style: { marginTop: 4 } },
-                `${progress.done}/${progress.total} · ${progress.what}`,
+                {
+                  className: 'ws-sub',
+                  style: { marginTop: 4, display: 'flex', gap: 10, alignItems: 'baseline' },
+                },
+                h(
+                  'span',
+                  {
+                    style: {
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    },
+                    title: progress.what,
+                  },
+                  `${Math.round(frac * 100)}% · ${fmtBytes(progress.done)} / ${fmtBytes(progress.total)} · ${progress.what}`,
+                ),
+                speed
+                  ? h(
+                      'span',
+                      { className: 'ws-mono', style: { whiteSpace: 'nowrap', color: 'var(--ws-accent)' } },
+                      speed,
+                    )
+                  : null,
               ),
             )
           : null,

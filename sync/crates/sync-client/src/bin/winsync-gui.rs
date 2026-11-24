@@ -55,7 +55,8 @@ mod ui_colors {
 struct Runtime {
     running: bool,
     next_auto: Instant,
-    progress: Option<(u64, u64, String)>,
+    /// (已传字节, 总字节, 文件名, 上行 B/s, 下行 B/s)
+    progress: Option<(u64, u64, String, u64, u64)>,
     last: Option<Result<Report, String>>,
     last_time: Option<String>,
     logs: Vec<String>,
@@ -210,6 +211,21 @@ impl Wizard {
 }
 
 const MB: f64 = 1024.0 * 1024.0;
+
+/// 1234567 → 「1.2 MB」；进度条和速率都用它，别在两处各写一套。
+fn human_bytes(n: u64) -> String {
+    const K: f64 = 1024.0;
+    let f = n as f64;
+    if f >= K * K * K {
+        format!("{:.2} GB", f / (K * K * K))
+    } else if f >= K * K {
+        format!("{:.1} MB", f / (K * K))
+    } else if f >= K {
+        format!("{:.0} KB", f / K)
+    } else {
+        format!("{n} B")
+    }
+}
 
 fn main() -> eframe::Result<()> {
     #[cfg(windows)]
@@ -996,9 +1012,9 @@ impl eframe::App for App {
                                     }
                                 }
                             }
-                            Event::Progress { done, total, what } => {
+                            Event::Progress { done, total, what, up_bps, down_bps } => {
                                 if let Some(rt) = self.runtimes.get_mut(i) {
-                                    rt.progress = Some((done, total, what));
+                                    rt.progress = Some((done, total, what, up_bps, down_bps));
                                 }
                             }
                         }
@@ -1325,17 +1341,26 @@ impl App {
                             );
                         });
 
-                        if let Some((done, total, what)) = &progress {
+                        if let Some((done, total, what, up_bps, down_bps)) = &progress {
                             ui.add_space(8.0);
                             let frac = if *total == 0 {
                                 0.0
                             } else {
-                                *done as f32 / *total as f32
+                                (*done as f32 / *total as f32).clamp(0.0, 1.0)
                             };
-                            ui.add(egui::ProgressBar::new(frac).show_percentage());
-                            ui.label(
-                                egui::RichText::new(what).size(11.0).color(ui_colors::TEXT_3),
+                            ui.add(
+                                egui::ProgressBar::new(frac)
+                                    .show_percentage()
+                                    .text(format!("{} / {}", human_bytes(*done), human_bytes(*total))),
                             );
+                            let mut line = what.clone();
+                            if *up_bps > 0 {
+                                line.push_str(&format!("　↑ {}/s", human_bytes(*up_bps)));
+                            }
+                            if *down_bps > 0 {
+                                line.push_str(&format!("　↓ {}/s", human_bytes(*down_bps)));
+                            }
+                            ui.label(egui::RichText::new(line).size(11.0).color(ui_colors::TEXT_3));
                         }
 
                         ui.add_space(12.0);
