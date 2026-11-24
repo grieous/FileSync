@@ -4,6 +4,8 @@ sync/target/
 # 分发的二进制，不进版本库
 sync/dist/*.exe
 sync/dist.zip
+# 打包脚本的暂存目录（npm pack 的东西），不是发布物
+dist/.sync_temp_dir/
 
 # 某个工具自动生成的空嵌套仓库，保留但不纳入版本控制
 sync/.git.empty-backup/
