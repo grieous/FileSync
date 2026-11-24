@@ -66,10 +66,14 @@ WinSync / dsh-winsync 发布包（2026-11-24，插件 0.9.0 / 中继 0.6）
   任务卡上的进度条按字节走，右边是实时速率（↑ 上传 / ↓ 下载）。
 
   图形后端（Windows Server 2019 / 远程桌面重点看这一条）：
-    · 默认走 DirectX 12（wgpu）；机器上没有显卡时用 WARP 软件光栅，不再依赖 OpenGL 2.0，
-      所以 Server 2019 / RDP 里不会再「双击就崩」。
-    · 想看这次用的是哪个后端：%LOCALAPPDATA%\WinSync\gui.log（每次启动写一行，带适配器名）。
-    · 想强制换：set WINSYNC_RENDERER=glow  或  set WINSYNC_RENDERER=wgpu  再启动。
+    · 默认走 DirectX 12（wgpu）。机器上没有显卡时用 WARP（Microsoft Basic Render Driver，
+      日志里显示 device_type=Cpu），不再依赖 OpenGL 2.0，所以 Server 2019 / RDP 不会「双击就崩」。
+    · 先自检一次（不开窗口，只枚举图形适配器，会弹框并写日志）：
+        winsync-gui.exe --check-render
+      期望看到 [Backends(DX12)] Dx12/Cpu name=Microsoft Basic Render Driver（有显卡则还有 Dx12/IntegratedGpu）。
+    · 每次启动的实际情况：%LOCALAPPDATA%\WinSync\gui.log（一行，带后端、设备类型、适配器名）。
+    · 强制换后端：set WINSYNC_RENDERER=glow|wgpu；只想换 wgpu 内部的图形 API：
+        set WINSYNC_WGPU_BACKEND=dx12   （或 vulkan / gl）
     · 两个后端都起不来：弹框说明并写 %LOCALAPPDATA%\WinSync\gui-error.log，不会静默闪退。
 
 六、文件

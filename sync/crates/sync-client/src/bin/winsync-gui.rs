@@ -474,6 +474,12 @@ fn human_bytes(n: u64) -> String {
 }
 
 fn main() -> eframe::Result<()> {
+    // 只查图形后端，不开窗口：服务器上「起不来」时，先跑这个把清单拿到手
+    if std::env::args().any(|a| a == "--check-render") {
+        check_render();
+        return Ok(());
+    }
+
     // 「换后端重试」的子进程不要抢单实例锁：父进程这时可能还没退干净
     let retried = std::env::var("WINSYNC_RENDERER_RETRY").is_ok();
 
@@ -523,28 +529,125 @@ fn main() -> eframe::Result<()> {
     match launch(first, viewport) {
         Ok(()) => Ok(()),
         Err(err) => {
-            // 同一个进程里换不了（winit 的事件循环只能建一次），交给子进程重来
-            if !retried && relaunch_with(other) {
+            // 先把自己的失败记下来：换子进程重试后，这一条不会被覆盖掉
+            append_gui_log(&format!(
+                "{} 启动失败：后端={} 错误={}",
+                now_stamp(),
+                backend_name(first),
+                one_line(&err)
+            ));
+            // 同一个进程里换不了（winit 的事件循环只能建一次），交给子进程重来；
+            // 把这次的错误也带过去，否则最后只剩子进程那条，看不到全貌
+            if !retried && relaunch_with(other, &err) {
                 return Ok(());
             }
-            report_render_failure(&err, first);
+            let prev = std::env::var("WINSYNC_RENDER_PREV").ok();
+            report_render_failure(&err, first, prev.as_deref());
             std::process::exit(1);
         }
     }
 }
 
-/// wgpu 的后端配置：只留 DX12 / Vulkan / GL。
+fn backend_name(renderer: eframe::Renderer) -> &'static str {
+    match renderer {
+        eframe::Renderer::Glow => "OpenGL(glow)",
+        _ => "DirectX12(wgpu)",
+    }
+}
+
+/// `--check-render`：枚举这块机器上 wgpu 能看见的图形适配器，写日志 + 弹框。
 ///
-/// 关键在 DX12：Windows Server 2019、远程桌面、没装显卡驱动的机器上，硬件适配器一个都没有，
-/// 但 DirectX 12 自带 **WARP 软件光栅**，wgpu 会把它当成 `DeviceType::Cpu` 的适配器用起来——
-/// 这是唯一能在服务器上把窗口画出来的路。GL 留着的意义只是老机器兜底
-/// （wgpu 的 GL 后端在 Server 2019 上同样不可用，但探测一下不影响）。
+/// 不开窗口、不建上下文，所以「没有 OpenGL 的服务器」上一定能跑。
+/// 服务器起不来时先要这份清单：有没有 DX12、有没有 WARP（`DeviceType::Cpu`）一目了然。
+fn check_render() {
+    use eframe::wgpu::{Backends, Instance, InstanceDescriptor};
+
+    let mut lines: Vec<String> = Vec::new();
+    for backends in [Backends::DX12, Backends::VULKAN, Backends::GL, Backends::all()] {
+        let label = format!("{backends:?}");
+        let instance = Instance::new(InstanceDescriptor {
+            backends,
+            ..Default::default()
+        });
+        let adapters: Vec<String> = instance
+            .enumerate_adapters(backends)
+            .into_iter()
+            .map(|adapter| {
+                let info = adapter.get_info();
+                format!(
+                    "{:?}/{:?} name={} driver={} {}",
+                    info.backend, info.device_type, info.name, info.driver, info.driver_info
+                )
+            })
+            .collect();
+        if adapters.is_empty() {
+            lines.push(format!("[{label}] 无适配器"));
+        } else {
+            for a in adapters {
+                lines.push(format!("[{label}] {a}"));
+            }
+        }
+    }
+
+    let report = format!(
+        "{} --check-render（wgpu 枚举结果）\n{}\n",
+        now_stamp(),
+        lines.join("\n")
+    );
+    append_gui_log(&report);
+    eprintln!("{report}");
+    rfd::MessageDialog::new()
+        .set_title("WinSync 图形后端检查")
+        .set_description(format!(
+            "{}\n结果已追加到 %LOCALAPPDATA%\\WinSync\\gui.log\n\n\
+             需要 DX12（没有显卡时会是 Microsoft Basic Render Driver，即 WARP）。",
+            report
+        ))
+        .set_level(rfd::MessageLevel::Info)
+        .show();
+}
+
+/// 错误里可能有换行，日志/环境变量只要一行
+fn one_line(text: &str) -> String {
+    text.replace(['\r', '\n'], " ").trim().to_string()
+}
+
+/// wgpu 的后端配置。
+///
+/// **Windows 上刻意不包含 GL**：Server 2019 / 远程桌面里那套「GDI 通用」的 OpenGL 1.1
+/// 会被 wgpu 枚举成一个「可用」适配器（`device_type = Other`，排序还排在 WARP 的 `Cpu` 之前），
+/// 选中之后建上下文一样失败——那就等于绕一圈又踩回 glow 的坑（现场日志就是这个现象：
+/// wgpu 那次没成，退到 glow 报 `requires opengl 2.0+`）。只留 DX12 / Vulkan：
+/// 有显卡的机器一定有其中之一，没显卡的机器由 DX12 的 WARP 软件光栅兜住。
 fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     let mut config = eframe::egui_wgpu::WgpuConfiguration::default();
-    config.supported_backends = eframe::wgpu::Backends::DX12
-        | eframe::wgpu::Backends::VULKAN
-        | eframe::wgpu::Backends::GL;
+    #[cfg(windows)]
+    {
+        config.supported_backends = eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::VULKAN;
+    }
+    #[cfg(not(windows))]
+    {
+        config.supported_backends = eframe::wgpu::Backends::VULKAN | eframe::wgpu::Backends::GL;
+    }
     config.power_preference = eframe::wgpu::PowerPreference::LowPower;
+    // 逃生口：想单独验某个后端（比如在服务器上强制走 DX12/WARP）：
+    //   set WINSYNC_WGPU_BACKEND=dx12   /  vulkan  /  gl
+    if let Ok(want) = std::env::var("WINSYNC_WGPU_BACKEND") {
+        let want = want.to_ascii_lowercase();
+        let mut picked = eframe::wgpu::Backends::empty();
+        if want.contains("dx12") {
+            picked |= eframe::wgpu::Backends::DX12;
+        }
+        if want.contains("vulkan") {
+            picked |= eframe::wgpu::Backends::VULKAN;
+        }
+        if want.contains("gl") {
+            picked |= eframe::wgpu::Backends::GL;
+        }
+        if !picked.is_empty() {
+            config.supported_backends = picked;
+        }
+    }
     config
 }
 
@@ -589,11 +692,12 @@ fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
 /// 换一个后端再试：**必须开新进程**。winit 的事件循环一个进程只能建一次，
 /// 在同一个进程里重试会直接 panic，所以让子进程带着环境变量重来，自己先退出。
 #[cfg(windows)]
-fn relaunch_with(renderer: &str) -> bool {
+fn relaunch_with(renderer: &str, reason: &str) -> bool {
     match std::env::current_exe() {
         Ok(exe) => std::process::Command::new(exe)
             .env("WINSYNC_RENDERER", renderer)
             .env("WINSYNC_RENDERER_RETRY", "1")
+            .env("WINSYNC_RENDER_PREV", one_line(reason))
             .spawn()
             .is_ok(),
         Err(_) => false,
@@ -601,7 +705,7 @@ fn relaunch_with(renderer: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-fn relaunch_with(_renderer: &str) -> bool {
+fn relaunch_with(_renderer: &str, _reason: &str) -> bool {
     false
 }
 
@@ -623,19 +727,25 @@ fn note_render_backend(cc: &eframe::CreationContext<'_>) {
         }
         None => format!("{} 启动：后端=glow(OpenGL)", now_stamp()),
     };
+    append_gui_log(&line);
+}
+
+/// 往 gui.log 追加一行，只留最近 200 行。
+/// 启动成功记「用的是哪个后端」，起不来记「哪个后端因为什么失败」——
+/// 服务器上排查，这两类才是要看的东西。
+fn append_gui_log(line: &str) {
     let mut dir = std::env::var("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
     dir.push("WinSync");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("gui.log");
-    // 只留最近 200 行，别让日志无限长
     let mut kept: Vec<String> = std::fs::read_to_string(&path)
         .unwrap_or_default()
         .lines()
         .map(|s| s.to_string())
         .collect();
-    kept.push(line);
+    kept.push(line.to_string());
     if kept.len() > 200 {
         kept.drain(0..kept.len() - 200);
     }
@@ -643,28 +753,38 @@ fn note_render_backend(cc: &eframe::CreationContext<'_>) {
 }
 
 /// 两个后端都起不来：写一份能看的日志，再弹框说清怎么办（而不是静默退出）。
-fn report_render_failure(error: &str, renderer: eframe::Renderer) {
-    let backend = match renderer {
-        eframe::Renderer::Glow => "OpenGL(glow)",
-        _ => "DirectX 12(wgpu)",
-    };
+fn report_render_failure(error: &str, renderer: eframe::Renderer, previous: Option<&str>) {
+    let backend = backend_name(renderer);
     let mut dir = std::env::var("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
     dir.push("WinSync");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("gui-error.log");
+    // 两次尝试都写进去：只看最后一条会把「为什么换的后端」丢掉（现场那次就只剩 glow 的报错）
+    let prev_line = match previous {
+        Some(p) if !p.is_empty() => format!("上一次：{p}\n"),
+        _ => String::new(),
+    };
     let body = format!(
-        "时间：{stamp}\n后端：{backend}\n错误：{error}\n\n\
+        "时间：{stamp}\n后端：{backend}\n错误：{error}\n{prev_line}\n\
          这个窗口起不来，通常是图形后端不可用：\n\
-         · Windows Server / 远程桌面：默认已改用 DirectX 12，没有显卡时会走 WARP 软件光栅；\n\
-         · 想强制换后端：set WINSYNC_RENDERER=glow  或  set WINSYNC_RENDERER=wgpu  后再启动；\n\
-         · 仍然起不来就用命令行版 winsync.exe 同步（同一套同步引擎）。\n\
+         · Server 2019 / 远程桌面：需要 DirectX 12（没显卡时会走 WARP 软件光栅）。\n\
+           若 gui.log 里显示 wgpu 也失败，多半是这台机器连 DX12 都没有，\n\
+           或者系统缺少 d3d12.dll / 被组策略禁用了 WARP。\n\
+         · 有显卡驱动的机器可以试：set WINSYNC_RENDERER=glow  后再启动；\n\
+         · 仍然起不来就用命令行版 winsync.exe 同步（同一套同步引擎，不需要图形界面）。\n\
          日志位置：{path}\n",
         stamp = now_stamp(),
         path = path.display(),
     );
     let _ = std::fs::write(&path, &body);
+    append_gui_log(&format!(
+        "{} 两个后端都失败：{} / {}",
+        now_stamp(),
+        one_line(previous.unwrap_or("")),
+        one_line(error)
+    ));
     rfd::MessageDialog::new()
         .set_title("WinSync 启动失败")
         .set_description(format!(

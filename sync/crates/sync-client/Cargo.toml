@@ -26,6 +26,11 @@ eframe = { version = "0.29", default-features = false, features = [
     "glow",
     "wgpu",
 ] }
+
+# eframe 对 wgpu 是 default-features = false，只开了 metal / webgpu——
+# **dx12 后端不在里面**。Vulkan / GL 在 wgpu 里不受特性控制，所以显卡机器上照样能跑，
+# 但服务器（没 Vulkan、只有 OpenGL 1.1）就一个后端都没有，wgpu 必然失败。
+# 这里显式开 dx12：cargo 会做特性合并，同一个 wgpu 实例多编进一个后端（见下方 windows 段）。
 # 选择文件夹的系统对话框
 rfd = "0.15"
 # 系统托盘图标与右键菜单
@@ -34,6 +39,9 @@ tray-icon = "0.19"
 # Windows 控制台默认是代码页 936，Rust 输出 UTF-8 中文会乱码，需要显式切到 65001
 # 另外用到 Threading / Foundation 做单实例互斥体
 [target.'cfg(windows)'.dependencies]
+# eframe 对 wgpu 用 default-features = false（只开 metal / webgpu），**dx12 后端因此缺失**；
+# 这里补上，特性会合并进同一个 wgpu 实例。没有它，服务器上 wgpu 一个可用后端都没有。
+wgpu = { version = "22.1", default-features = false, features = ["dx12", "wgsl"] }
 windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_System_Threading",
