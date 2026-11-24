@@ -395,8 +395,11 @@ impl Wizard {
             reveal_room: false,
             token: seed.map(|t| t.token.clone()).unwrap_or_default(),
             // 没沿用旧任务就自动生成房间码：不用起名字，也不用去中继登记（与插件一致）
+            // 旧版本可能在任务里留下 "default"（老代码的兜底值），沿用时要当成没填，
+            // 否则新任务又建在 default 房间里，两台机器永远碰不上。
             workspace: seed
                 .map(|t| t.workspace.clone())
+                .filter(|w| !w.trim().is_empty() && w.trim() != "default")
                 .unwrap_or_else(new_room_code),
             mode: SyncMode::Bidirectional,
             dotfiles: false,
@@ -1183,6 +1186,8 @@ struct App {
     rx: Receiver<WorkerMsg>,
     watch_tx: Sender<String>,
     watch_rx: Receiver<String>,
+    /// 上一次配对拿到的「房间码, 密钥」：老任务挂 default 时用来一键修
+    last_pair: Option<(String, String)>,
     /// 配对守护 → 界面（带 gen，过期的丢）
     pair_tx: Sender<(u64, PairEvent)>,
     pair_rx: Receiver<(u64, PairEvent)>,
@@ -1242,6 +1247,7 @@ impl App {
             rx,
             watch_tx,
             watch_rx,
+            last_pair: None,
             pair_tx,
             pair_rx,
             tray_ready: false,
@@ -1641,6 +1647,8 @@ impl eframe::App for App {
 
         // 配对守护发来的阶段变化：只认当前这一代，旧线程的事件直接丢
         while let Ok((gen, ev)) = self.pair_rx.try_recv() {
+            // 记住这次配对拿到的房间码：老任务要是还挂着 default，可以一键修回来
+            let mut remember: Option<(String, String)> = None;
             if let Some(w) = &mut self.wizard {
                 if w.pair_gen != gen {
                     continue;
@@ -1650,19 +1658,30 @@ impl eframe::App for App {
                         // 配上过就不再回退：对端离开配对房间不该把门禁重新关上
                         if phase == PairPhase::Paired {
                             w.ever_paired = true;
+                            if !w.workspace.trim().is_empty() {
+                                remember = Some((w.workspace.clone(), w.token.clone()));
+                            }
                         }
                         w.pair_phase = phase;
                         w.pair_peer = peer;
                         w.pair_error = error;
                     }
                     PairEvent::Carried(room, token) => {
-                        // 加入端：创建端把房间码与密钥带过来了，直接填上（默认仍是打码显示）
-                        if w.entry == 1 && !room.is_empty() {
-                            w.workspace = room;
-                            w.token = token;
+                        // 对端把房间码与密钥带过来了，直接填上（默认仍是打码显示）。
+                        // 加入端无条件采用；创建端只在自己「空着 / 还是 default」时采用，
+                        // 免得覆盖自己刚生成的那一间。
+                        let stale = w.workspace.trim().is_empty() || w.workspace.trim() == "default";
+                        if !room.is_empty() && (w.entry == 1 || stale) {
+                            w.workspace = room.clone();
+                            w.token = token.clone();
+                            w.reveal_room = false;
+                            remember = Some((room, token));
                         }
                     }
                 }
+            }
+            if let Some(pair) = remember {
+                self.last_pair = Some(pair);
             }
         }
         self.sync_pairing();
@@ -1670,7 +1689,8 @@ impl eframe::App for App {
         if SELFTEST_FRAMES.load(Ordering::Relaxed) > 0 {
             if SELFTEST_FRAMES.fetch_sub(1, Ordering::Relaxed) == 1 {
                 let phase = self.wizard.as_ref().map(|w| w.pair_phase);
-                std::eprintln!("[selftest] 向导画完 45 帧，配对阶段={:?}，退出", phase);
+                let room = self.wizard.as_ref().map(|w| w.workspace.clone()).unwrap_or_default();
+                std::eprintln!("[selftest] 向导画完 45 帧，配对阶段={:?}，房间码={}，退出", phase, room);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -2085,15 +2105,31 @@ impl App {
                                         .size(11.0)
                                         .color(ui_colors::TEXT_3),
                                 );
+                                // 房间码还挂在 default 的就是旧版本留下的任务：
+                                // 两台机器都会连到那间公共房，等于「配对成功了却同步不了」。
+                                let legacy_room = task.workspace.trim() == "default";
                                 ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} / {}",
-                                        short_server(&task.server),
-                                        short_room(&task.workspace)
-                                    ))
+                                    egui::RichText::new(if legacy_room {
+                                        format!("{} / default（旧版遗留）", short_server(&task.server))
+                                    } else {
+                                        format!(
+                                            "{} / {}",
+                                            short_server(&task.server),
+                                            short_room(&task.workspace)
+                                        )
+                                    })
                                     .size(12.0)
-                                    .color(ui_colors::TEXT),
-                                );
+                                    .color(if legacy_room {
+                                        ui_colors::DANGER
+                                    } else {
+                                        ui_colors::TEXT
+                                    }),
+                                )
+                                .on_hover_text(if legacy_room {
+                                    "旧版本创建任务时把房间码兜底成 default。\n打开「⋯ → 设置」点「用配对结果修正房间码」即可。"
+                                } else {
+                                    ""
+                                });
                             });
                             ui.allocate_ui(egui::vec2(col, 40.0), |ui| {
                                 ui.label(
@@ -2660,6 +2696,32 @@ impl App {
                 relay_fields(ui, &mut self.buf.host, &mut self.buf.port);
                 ui.add_space(8.0);
                 room_field(ui, &mut self.buf.workspace, &mut self.buf.reveal_room);
+                // 老任务（修复前建的）房间码可能是 "default"，怎么都对不上；
+                // 这次配对拿到的那个才能用，给一个一键修回来的入口。
+                if let Some((room, token)) = self.last_pair.clone() {
+                    if !room.trim().is_empty() && room != self.buf.workspace.trim() {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .small_button("用配对结果修正房间码")
+                                .on_hover_text(format!("配对得到的房间码：{room}"))
+                                .clicked()
+                            {
+                                self.buf.workspace = room.clone();
+                                self.buf.token = token.clone();
+                                self.buf.reveal_room = true;
+                            }
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "配对结果：{}",
+                                    short_room(&room)
+                                ))
+                                .size(11.0)
+                                .color(ui_colors::TEXT_3),
+                            );
+                        });
+                    }
+                }
                 ui.add_space(8.0);
                 field(
                     ui,
@@ -2963,121 +3025,7 @@ impl App {
 
         match w.step {
             0 => {
-                // 两个入口，顺序与插件一致：加入在前、创建在后
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(w.entry == 1, "加入已有同步").clicked() && w.entry != 1 {
-                        w.entry = 1;
-                        w.channel.clear();
-                        w.workspace.clear();
-                        w.token.clear();
-                        w.ever_paired = false;
-                        w.stop_pairing();
-                    }
-                    if ui.selectable_label(w.entry == 0, "创建新同步").clicked() && w.entry != 0 {
-                        w.entry = 0;
-                        if w.workspace.trim().is_empty() {
-                            w.workspace = new_room_code();
-                        }
-                        if w.channel.len() != 6 {
-                            w.channel = new_channel();
-                        }
-                        w.ever_paired = false;
-                        w.stop_pairing();
-                    }
-                });
-                ui.add_space(12.0);
-                ui.label(
-                    egui::RichText::new("连接到中继服务器")
-                        .size(14.0)
-                        .strong()
-                        .color(ui_colors::TEXT),
-                );
-                ui.add_space(10.0);
-                relay_fields(ui, &mut w.host, &mut w.port);
-                ui.add_space(10.0);
-
-                // 通道码：6 位数字，念一遍就能对上；配上之后锁住，别让人改了对不上
-                let locked = w.pairing_done();
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("通道码")
-                            .size(12.0)
-                            .color(ui_colors::TEXT_2),
-                    );
-                    if w.entry == 0 && !locked && ui.small_button("换一个").clicked() {
-                        w.channel = new_channel();
-                        w.stop_pairing();
-                    }
-                    if ui.small_button("复制").clicked() {
-                        ui.output_mut(|o| o.copied_text = w.channel.clone());
-                    }
-                });
-                let mut edit = egui::TextEdit::singleline(&mut w.channel)
-                    .hint_text("6 位数字")
-                    .desired_width(160.0)
-                    .char_limit(6)
-                    .font(egui::TextStyle::Monospace);
-                if locked {
-                    edit = edit.interactive(false);
-                }
-                let resp = ui.add(edit);
-                if resp.changed() {
-                    let digits: String = w
-                        .channel
-                        .chars()
-                        .filter(|c| c.is_ascii_digit())
-                        .take(6)
-                        .collect();
-                    if digits != w.channel {
-                        w.channel = digits;
-                    }
-                }
-                ui.label(
-                    egui::RichText::new(if locked {
-                        "配对已完成，通道码锁定；要换一组配置就点「重新配对」"
-                    } else if w.entry == 0 {
-                        "把这 6 位数字告诉对方，让对方填进同一个通道码"
-                    } else {
-                        "填对方给你的 6 位数字；房间码与密钥会自动带过来，不用手抄"
-                    })
-                    .size(11.0)
-                    .color(ui_colors::TEXT_3),
-                );
-
-                ui.add_space(10.0);
-                pair_card(ui, w);
-                // 加入端配上对了、房间码却还是空的：说明对端的配置没带过来（对端可能也在「加入」）
-                if w.entry == 1 && w.pairing_done() && w.workspace.trim().is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(
-                            "房间码还没到：让对方用「创建新同步」在同一个通道码里再配一次，\
-                             或展开下面的高级配置手动填。",
-                        )
-                        .size(11.0)
-                        .color(ui_colors::WARN),
-                    );
-                }
-
-                ui.add_space(10.0);
-                egui::CollapsingHeader::new(
-                    egui::RichText::new("高级：房间码 / 密钥")
-                        .size(12.0)
-                        .color(ui_colors::TEXT_2),
-                )
-                .default_open(false)
-                .show(ui, |ui| {
-                    room_field(ui, &mut w.workspace, &mut w.reveal_room);
-                    ui.add_space(8.0);
-                    field(
-                        ui,
-                        "密钥",
-                        &mut w.token,
-                        "留空则与房间码相同（中继配了房间密钥才需要填）",
-                        true,
-                    );
-                });
-
+                pairing_block(ui, w);
                 if let Some(t) = self.settings.tasks.first() {
                     ui.add_space(10.0);
                     if ui
@@ -3274,6 +3222,134 @@ impl App {
             self.wizard = None;
         }
     }
+}
+
+/// 「连接与配对」一整块：入口、地址、通道码、配对状态、房间码全在同一张卡里。
+///
+/// 以前房间码藏在「高级」折叠里，配完对的人根本看不到自己究竟在哪一间房——
+/// 出问题时（比如是老任务留下的 `default`）也无从判断。
+fn pairing_block(ui: &mut egui::Ui, w: &mut Wizard) {
+    egui::Frame::none()
+        .fill(ui_colors::CARD)
+        .stroke(egui::Stroke::new(0.5_f32, ui_colors::BORDER))
+        .rounding(egui::Rounding::same(10.0))
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui, |ui| {
+            // ① 入口
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(w.entry == 1, "加入已有同步")
+                    .clicked()
+                    && w.entry != 1
+                {
+                    w.entry = 1;
+                    w.channel.clear();
+                    w.workspace.clear();
+                    w.token.clear();
+                    w.ever_paired = false;
+                    w.stop_pairing();
+                }
+                if ui.selectable_label(w.entry == 0, "创建新同步").clicked() && w.entry != 0 {
+                    w.entry = 0;
+                    if w.workspace.trim().is_empty() || w.workspace.trim() == "default" {
+                        w.workspace = new_room_code();
+                    }
+                    if w.channel.len() != 6 {
+                        w.channel = new_channel();
+                    }
+                    w.ever_paired = false;
+                    w.stop_pairing();
+                }
+            });
+
+            // ② 中继地址
+            ui.add_space(12.0);
+            relay_fields(ui, &mut w.host, &mut w.port);
+
+            // ③ 通道码
+            ui.add_space(12.0);
+            let locked = w.pairing_done();
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("通道码")
+                        .size(12.0)
+                        .color(ui_colors::TEXT_2),
+                );
+                if w.entry == 0 && !locked && ui.small_button("换一个").clicked() {
+                    w.channel = new_channel();
+                    w.stop_pairing();
+                }
+                if ui.small_button("复制").clicked() {
+                    ui.output_mut(|o| o.copied_text = w.channel.clone());
+                }
+            });
+            let mut edit = egui::TextEdit::singleline(&mut w.channel)
+                .hint_text("6 位数字")
+                .desired_width(160.0)
+                .char_limit(6)
+                .font(egui::TextStyle::Monospace);
+            if locked {
+                edit = edit.interactive(false);
+            }
+            let resp = ui.add(edit);
+            if resp.changed() {
+                let digits: String = w
+                    .channel
+                    .chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .take(6)
+                    .collect();
+                if digits != w.channel {
+                    w.channel = digits;
+                }
+            }
+            ui.label(
+                egui::RichText::new(if locked {
+                    "配对已完成，通道码锁定；要换一组配置就点「重新配对」"
+                } else if w.entry == 0 {
+                    "把这 6 位数字告诉对方，让对方填进同一个通道码"
+                } else {
+                    "填对方给你的 6 位数字；房间码与密钥会自动带过来，不用手抄"
+                })
+                .size(11.0)
+                .color(ui_colors::TEXT_3),
+            );
+
+            // ④ 配对状态
+            ui.add_space(10.0);
+            pair_card(ui, w);
+
+            // ⑤ 房间码：配对结果就是它，直接摆在卡片里
+            ui.add_space(10.0);
+            room_field(ui, &mut w.workspace, &mut w.reveal_room);
+            if w.entry == 1 && w.pairing_done() && w.workspace.trim().is_empty() {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "房间码还没到：让对方用「创建新同步」在同一个通道码里再配一次，或在上面手动填。",
+                    )
+                    .size(11.0)
+                    .color(ui_colors::WARN),
+                );
+            }
+
+            // ⑥ 密钥（很少需要填，收起来）
+            egui::CollapsingHeader::new(
+                egui::RichText::new("高级：密钥")
+                    .size(12.0)
+                    .color(ui_colors::TEXT_2),
+            )
+            .default_open(false)
+            .show(ui, |ui| {
+                field(
+                    ui,
+                    "密钥",
+                    &mut w.token,
+                    "留空则与房间码相同（中继配了房间密钥才需要填）",
+                    true,
+                );
+            });
+        });
 }
 
 /// 配对卡片：文案与插件同一套（状态 + 一句原因 + 配对房间名 + 重新配对）。
@@ -3753,6 +3829,16 @@ mod pair_tests {
             assert_eq!(c.len(), 6, "{c}");
             assert!(c.chars().all(|ch| ch.is_ascii_digit()), "{c}");
         }
+    }
+
+    /// 沿用旧任务时，遗留的 "default" 必须当成没填：不然新任务又建在 default 房间里。
+    #[test]
+    fn seed_default_room_is_regenerated() {
+        let mut legacy = Config::default();
+        legacy.workspace = "default".into();
+        let w = Wizard::new(Some(&legacy));
+        assert_ne!(w.workspace, "default", "没把遗留的 default 换掉");
+        assert!(w.workspace.starts_with('k') && w.workspace.len() == 33, "{}", w.workspace);
     }
 
     /// 创建端的密钥留空 = 跟随房间码；否则 Config::issues() 会一直拦着「创建任务」。
