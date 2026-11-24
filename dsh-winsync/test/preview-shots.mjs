@@ -97,6 +97,8 @@ global.fetch = async (url, init = {}) => {
       presence = { ...presence, room: sent.workspace ?? '' }
     }
     body = { ok: true, presence }
+  } else if (target.includes('/probe')) {
+    body = { ok: true, result: { state: 'unreachable', message: '连不上 ws://10.90.45.64:38443/ws：IO error: 由于连接方在一段时间后没有正确答复或连接主机没有反应，连接尝试失败。 (os error 10060)', elapsed_ms: 6003 } }
   } else if (target.includes('/state')) body = state
   else if (target.includes('/version')) body = { ok: true, version: '0.8.0', label: '0.8.0', dir: 'C:\\repo' }
   else if (target.includes('/activities')) body = { ok: true, rows: [] }
@@ -157,8 +159,10 @@ const taskShot = document.documentElement.outerHTML
 /* 2. 向导第一步：已配对 + 高级配置展开显示 */
 await click(byText('.ws-nav-item', '创建同步任务'))
 assertExists(document.querySelector('.ws-modal'), '向导没打开')
-await typeInto(document.querySelector('.ws-modal input[placeholder^="192.168"]'), '127.0.0.1:18444')
+await typeInto(document.querySelector('.ws-modal input[placeholder^="192.168"]'), '10.90.45.64:38443')
 await wait(120)
+await click(byText('.ws-btn', '测试地址'))
+await wait(150)
 const channel = document.querySelector('input.ws-channel').value
 presence = {
   state: 'paired',

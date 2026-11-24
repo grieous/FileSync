@@ -1,14 +1,15 @@
-WinSync / dsh-winsync 发布包（2026-11-23，插件 0.8.2 / 中继 0.5）
+WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.3 / 中继 0.5）
 
 一、只装 dsh 插件（Windows，推荐）
-  dsh plugin --profile desktop add "本目录\dsh-winsync-0.8.2.tgz"
+  dsh plugin --profile desktop add "本目录\dsh-winsync-0.8.3.tgz"
   重启 dsh → 左侧栏「文件同步」。
   插件包里自带 daemon（bin/winsync-daemon.exe.gz，首次运行展开到
   %LOCALAPPDATA%\dsh-winsync\bin），不需要另外放文件。
 
-二、配对流程（0.8.2：6 位通道码，配对成功才能进下一步）
+二、配对流程（0.8.x：6 位通道码，配对成功才能进下一步）
   1. A 机点「创建同步任务」：中继地址分两栏填 IP 与端口（如 192.168.3.222 + 18443，
-     端口留空按 8443）。通道码自动生成 6 位数字，房间码/密钥都在「高级配置」里、
+     端口留空按 8443）。填完可先点「测试地址」验一下：超时＝这台机器到不了那个地址，
+     被拒＝主机到了但端口没人监听。通道码自动生成 6 位数字，房间码/密钥都在「高级配置」里、
      默认打码，不用管。地址填过一次就记住了，下次新建自动带出。
   2. B 机点「创建同步任务 → 加入已有同步」，填同一个 6 位通道码。
      界面上没有邀请串了：对方给的就是这 6 位数字。
@@ -38,7 +39,7 @@ WinSync / dsh-winsync 发布包（2026-11-23，插件 0.8.2 / 中继 0.5）
      否则第一步永远连不上——加一条 "*" 兜底密钥最省事。
 
 四、文件
-  dsh-winsync-0.8.2.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
+  dsh-winsync-0.8.3.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
   winsync-relay-0.5.tar.gz     中继镜像（docker load 导入）
   winsync-daemon.exe           单独一份 daemon（备用；插件包内已有）
   winsync.exe                  命令行客户端（排查用）

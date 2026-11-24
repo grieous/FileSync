@@ -418,6 +418,28 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 「连不上」得拆成两种，提示才有用：
+     *   - 超时（WSAETIMEDOUT / os error 10060）= 这台机器压根到不了那个地址：主机不存在、
+     *     不在同一网络、或防火墙把包丢了。跟端口栏怎么填没关系。
+     *   - 拒绝（os error 10061）= 主机到了，但那个端口没人监听：端口号不对 / 容器没起。
+     * 以前两种情况都甩一句「端口填在第二栏」，明明填对了还被人当操作错误，跑偏方向。
+     */
+    function unreachableHint(error, target) {
+      const text = String(error ?? '')
+      const where = target || '这个地址'
+      if (/10061|refused|拒绝/i.test(text)) {
+        return `主机通了，但 ${where} 这个端口没人监听：核对端口号（docker 里 -p 18443:8443，对外就是 18443），`
+          + '或确认中继容器在跑。'
+      }
+      if (/10060|timed? ?out|超时|没有正确答复|没连上|\d+ ?秒内/i.test(text)) {
+        return `${where} 没有任何响应（超时，不是密钥问题）：这台机器到不了这个地址。`
+          + '① 地址是否笔误（把 18443 写成 38443？）② 两台机器是否同一网络（跨网段 / 换 WiFi / 连 VPN 都会这样）'
+          + '③ 中继主机防火墙是否放行。可用「测试地址」单独验，不用等配对。'
+      }
+      return `${text || '连不上中继'}（目标 ${where}）`
+    }
+
+    /**
      * 房间码：32 位随机串，同时也是配对凭证。
      * 中继只按房间名配对、不维护名单，所以「猜不到的房间名」就是门禁——
      * 给别人用的时候不用再去服务器加一条配置。
@@ -1607,6 +1629,9 @@ window.__ModuleLoader__.load({
       const [reveal, setReveal] = React.useState(false)
       // 配对成功就锁住通道码：它已经完成使命，还能改只会把对端甩在半路
       const [locked, setLocked] = React.useState(false)
+      // 「测试地址」的结论：借 daemon 的 /api/probe 单独验一次可达性，不用等配对/不用凑齐通道码
+      const [probe, setProbe] = React.useState(null)
+      const [probing, setProbing] = React.useState(false)
       // 配对是「一次性握手」，不是「持续在线」：配上过就是配上过。
       // 对端随后离开配对房间（它点了下一步、或守护断线重连）不该把这边重新关回去——
       // 门禁一旦通过就不再回退，否则通道码已经锁死、按钮又不给点，人会被卡死在第一步。
@@ -1658,6 +1683,44 @@ window.__ModuleLoader__.load({
           store.notify(`通道码已复制：${channel}`, 'ok')
         } catch {
           store.notify(`复制失败，可手动抄下：${channel}`, 'bad')
+        }
+      }
+
+      /**
+       * 单独测一下地址：走 daemon 的 /api/probe——它只握手、不发 Hello，所以
+       * 不占房间位、也不会被对端当成同步对端。排查「连不上」时先看这一步，
+       * 别等到配对状态里那段长错误里猜。
+       */
+      const runProbe = async () => {
+        if (!serverReady || probing) return
+        setProbing(true)
+        setProbe(null)
+        try {
+          const body = await api('/probe', {
+            method: 'POST',
+            body: {
+              server: normalized,
+              workspace: room || channel,
+              token: secret || room || channel,
+            },
+          })
+          const result = body?.result ?? {}
+          const state = result.state ?? 'error'
+          setProbe({
+            state,
+            text:
+              state === 'accepted'
+                ? `地址通了：${normalized}（${result.elapsed_ms ?? '?'} ms），剩下的只是两端对上通道码。`
+                : state === 'denied'
+                  ? `连到了，但中继拒绝了这组房间/密钥：${result.message ?? ''}`
+                  : state === 'bad-url'
+                    ? '地址写法不对：填 IP（或域名）与端口即可。'
+                    : unreachableHint(result.message, normalized),
+          })
+        } catch (e) {
+          setProbe({ state: 'error', text: `测试没跑起来：${e.message}` })
+        } finally {
+          setProbing(false)
         }
       }
 
@@ -1798,7 +1861,7 @@ window.__ModuleLoader__.load({
             + '给 SYNC_ROOMS 加一条 "*" 兜底密钥，或关掉房间级密钥。'
         }
         if (pair.state === 'unreachable') {
-          return `${pair.error || '检查 IP 与端口'}。端口填在第二栏，例如 18443。`
+          return unreachableHint(pair.error, normalized)
         }
         if (pair.state === 'error') return `后台服务没响应：${pair.error || '重启 dsh 再试'}`
         return '填好中继地址与 6 位通道码会自动开始配对；两端在同一个通道里才算配对成功。'
@@ -1880,6 +1943,8 @@ window.__ModuleLoader__.load({
             autoComplete: 'off',
             onChange: (e) => {
               const text = e.target.value
+              // 地址一动，上一次的测试结论就作废，免得看着旧结论改新地址
+              setProbe(null)
               // 整串地址照样能粘：带冒号或斜杠就自动拆到两栏
               if (/[:/]/.test(text)) {
                 const parts = splitRelay(text)
@@ -1896,7 +1961,10 @@ window.__ModuleLoader__.load({
             inputMode: 'numeric',
             autoComplete: 'off',
             maxLength: 5,
-            onChange: (e) => patch({ port: digitsOnly(e.target.value).slice(0, 5) }),
+            onChange: (e) => {
+              setProbe(null)
+              patch({ port: digitsOnly(e.target.value).slice(0, 5) })
+            },
           }),
         ),
         h(
@@ -1909,6 +1977,40 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'ws-hint' }, '已带出上次用的中继地址；换中继直接改这里，保存后会自动记住')
           : null,
         h('div', { className: 'ws-hint ws-mono' }, `将连接 ${normalized || '（待填写）'}`),
+        h(
+          'div',
+          { className: 'ws-row', style: { marginTop: 6, gap: 10, alignItems: 'center' } },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'ws-btn',
+              disabled: !serverReady || probing,
+              onClick: () => void runProbe(),
+            },
+            probing ? '测试中…' : '测试地址',
+          ),
+          probe
+            ? h(
+                'span',
+                {
+                  'data-probe': probe.state,
+                  className: 'ws-hint',
+                  style: {
+                    margin: 0,
+                    flex: 1,
+                    color:
+                      probe.state === 'accepted'
+                        ? 'var(--ws-ok)'
+                        : probe.state === 'denied'
+                          ? 'var(--ws-warn)'
+                          : 'var(--ws-danger)',
+                  },
+                },
+                probe.text,
+              )
+            : h('span', { className: 'ws-hint', style: { margin: 0 } }, '先单独确认这台机器能不能连到这里'),
+        ),
       )
 
       const channelField = h(
