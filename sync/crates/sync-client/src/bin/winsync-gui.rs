@@ -2152,12 +2152,21 @@ impl App {
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
                             let can = !running && task.issues().is_empty();
+                            // 禁用态要看得出来：以前 fill(PRIMARY)+白字，灰掉的按钮看着像能点
                             let btn = egui::Button::new(
                                 egui::RichText::new(if running { "同步中…" } else { "立即同步" })
                                     .size(12.0)
-                                    .color(egui::Color32::WHITE),
+                                    .color(if can {
+                                        egui::Color32::WHITE
+                                    } else {
+                                        ui_colors::TEXT_3
+                                    }),
                             )
-                            .fill(ui_colors::PRIMARY)
+                            .fill(if can {
+                                ui_colors::PRIMARY
+                            } else {
+                                ui_colors::CARD_HOVER
+                            })
                             .rounding(egui::Rounding::same(6.0))
                             .min_size(egui::vec2(88.0, 28.0));
                             if ui.add_enabled(can, btn).clicked() {

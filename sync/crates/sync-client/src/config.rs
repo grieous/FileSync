@@ -163,6 +163,20 @@ impl Config {
             && std::path::Path::new(&self.root).is_dir()
     }
 
+    /// 是不是一条「什么都没填的占位任务」。
+    ///
+    /// 老版本（以及旧的单任务格式 config.json）会留下一条全是默认值的任务：
+    /// 服务器 `ws://127.0.0.1:8443/ws`、房间 `default`、目录空、名字空。
+    /// 它永远不会同步成功，界面上却显示成一条真任务「未命名任务 · 配置不完整」。
+    /// 加载时把这种丢掉，比让用户自己去猜怎么删更省事。
+    pub fn is_placeholder(&self) -> bool {
+        self.root.trim().is_empty()
+            && self.token.trim().is_empty()
+            && self.name.trim().is_empty()
+            && self.workspace.trim() == "default"
+            && matches!(self.server.trim(), "" | "ws://127.0.0.1:8443/ws")
+    }
+
     /// 逐项检查，返回人能看懂的问题列表。
     pub fn issues(&self) -> Vec<String> {
         let mut v: Vec<String> = Vec::new();
@@ -278,16 +292,28 @@ impl Settings {
 
         if value.get("tasks").is_some() {
             let mut s: Settings = serde_json::from_value(value)?;
+            let before = s.tasks.len();
+            // 老版本可能把「全默认值」也写成了一条任务：这种东西留着只会让人困惑
+            s.tasks.retain(|t| !t.is_placeholder());
             for t in &mut s.tasks {
                 if t.id.is_empty() {
                     t.id = new_id();
                 }
+            }
+            if s.tasks.len() != before {
+                tracing::info!("已忽略 {} 条占位任务（目录/房间码都是默认值）", before - s.tasks.len());
+                let _ = s.save();
             }
             return Ok(Some(s));
         }
 
         // 旧格式：单任务
         let legacy: Config = serde_json::from_value(value)?;
+        if legacy.is_placeholder() {
+            // 旧格式里只有一串默认值（以前首次运行会写出这种文件）：不要迁移成任务
+            tracing::info!("旧配置是空占位，跳过迁移");
+            return Ok(None);
+        }
         let mut task = legacy;
         if task.id.is_empty() {
             task.id = new_id();
@@ -385,6 +411,20 @@ mod tests {
         assert_eq!(t.display_name(), "文档");
         t.name = "自定义".into();
         assert_eq!(t.display_name(), "自定义");
+    }
+
+    #[test]
+    /// 全默认值的占位任务（老版本 / 旧单任务格式留下的）必须能被认出来，
+    /// 否则界面上会多出一条「未命名任务 · 配置不完整」，用户还得自己猜怎么删。
+    #[test]
+    fn placeholder_task_is_recognized() {
+        assert!(Config::default().is_placeholder());
+        let mut with_root = Config::default();
+        with_root.root = r"D:\Sync".into();
+        assert!(!with_root.is_placeholder(), "填了目录就不算占位");
+        let mut named = Config::default();
+        named.name = "工作文档".into();
+        assert!(!named.is_placeholder(), "有名字就不算占位");
     }
 
     #[test]
