@@ -218,6 +218,7 @@ npm run pack
 | 覆盖安装报 `ERR_PNPM_EPERM … dsh-winsync_tmp_<pid>_<n>\bin` | daemon 是不是正在从 `node_modules\dsh-winsync\bin` 里跑（`Get-Process winsync-daemon`），或杀软在拦 `node_modules` 里的 exe | 0.5.2 起运行点是 `<state>\bin`，新装不会再犯。从 0.5.1 及更早升级的这一次先退 dsh、`Stop-Process -Name winsync-daemon -Force`、删掉旧 `node_modules\dsh-winsync`（含 `dsh-winsync_tmp_*`）再装 |
 | 左侧栏没有「同步」 | `dsh plugin --profile <p> list` 里有没有 `dsh-winsync`；浏览器 console 有没有模块加载错误 | 少东西就重装：删 `~/.dsh/profiles/<p>/node_modules/dsh-winsync` 再 `dsh plugin --profile <p> install --force` |
 | 面板打开是「同步服务不可用」 | 面板「设置 → 诊断」里的 `daemon` 段；`%LOCALAPPDATA%\dsh-winsync\daemon.json` 是否存在 | 点「重试」；仍失败就看 daemon 日志（`<state>\logs\`） |
+| 本机能进、对端一直「等对方」 | 两端进的不是同一间房；或对端插件还是 0.7.x（那时配对房间用的是 32 位房间码，不是 6 位通道码）；或房间被占满（一间只容 2 端） | 对比两端卡片上的「配对房间 `xxxxxx::pair`」是否一致；对端升到 0.8.x；中继上 `docker logs -f winsync-relay` 看 `加入 <房间>`、`配对成功`、`房间已满` 三行 |
 | 第一步一直「⏳ 正在等对方」 | 对方还没打开向导，或填的不是同一个 6 位通道码 | 把 6 位通道码念给对方（或点「复制通道码」发过去）；两端都进同一个配对通道后这边自动通过；若对端已经配过、只是暂时离开，会显示「已配对过」并放行 |
 | 第一步报「中继拒绝了配对通道」 | 中继启动时配了 `SYNC_ROOM_TOKENS`（房间级密钥），而配对通道 `<通道码>::pair` 不在名单里 | 给 `SYNC_ROOMS` 加一条 `"*"` 兜底密钥，或临时关掉房间级密钥 |
 | 第一步报「连不上中继」 | 超时（os error 10060）＝这台机器到不了那个地址：整台不可达、跨网段、防火墙丢包；被拒（10061）＝主机到了但端口没人监听 | 先点「测试地址」单独验（走 daemon 的 /probe，只握手不占房间）；超时先怀疑地址笔误（18443 写成 38443 很常见）与网络；被拒则为端口号/容器问题。两栏地址：IP 与端口分开填，端口空 = 8443 |

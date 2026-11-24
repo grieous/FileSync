@@ -319,7 +319,14 @@ async fn handle(socket: WebSocket, st: AppState, default_room: String) {
                         device_id = d.clone();
                         let name = if workspace_id.is_empty() { default_room.clone() } else { workspace_id.clone() };
                         tracing::info!("conn {my_id} 加入 {name}，device={device_id}");
-                        if !join(&st, &name, Client { id: my_id, device_id: device_id.clone(), tx: tx.clone() }).await {
+                        // 被拒绝时必须**直接往 sink 写 Bye**：join 里把 Bye 塞进 tx 是没用的，
+                        // 这里一 break，sink 随 loop 一起没了，那边排队的帧根本发不出去。
+                        // 结果就是客户端只看到 close 1006，然后无限重连「等对方」——最难查的一种。
+                        if let Err(reason) = join(&st, &name, Client { id: my_id, device_id: device_id.clone(), tx: tx.clone() }).await {
+                            tracing::warn!("拒绝 conn {my_id} 进入房间 {name}：{reason}");
+                            let bye = Frame::Control(Msg::Bye { reason });
+                            let _ = sink.send(Message::Binary(bye.encode())).await;
+                            let _ = sink.send(Message::Close(None)).await;
                             break;
                         }
                         joined = Some(name);
@@ -338,8 +345,8 @@ async fn handle(socket: WebSocket, st: AppState, default_room: String) {
     }
 }
 
-/// 入房。房间满（>2）返回 false，连接会被关闭。
-async fn join(st: &AppState, room_name: &str, client: Client) -> bool {
+/// 入房。房间满（>2）返回 Err(原因)，连接会被关闭。
+async fn join(st: &AppState, room_name: &str, client: Client) -> Result<(), String> {
     let mut rooms = st.rooms.lock().await;
     let room = rooms.entry(room_name.to_string()).or_default();
 
@@ -358,10 +365,7 @@ async fn join(st: &AppState, room_name: &str, client: Client) -> bool {
     }
 
     if room.clients.len() >= 2 {
-        let _ = client.tx.send(Frame::Control(Msg::Bye {
-            reason: "房间已满：本版本仅支持 2 台设备".into(),
-        }));
-        return false;
+        return Err("房间已满：本版本仅支持 2 台设备".into());
     }
 
     room.clients.push(client);
@@ -387,7 +391,7 @@ async fn join(st: &AppState, room_name: &str, client: Client) -> bool {
             peer_device_id: None,
         }));
     }
-    true
+    Ok(())
 }
 
 async fn leave(st: &AppState, room_name: &str, id: u64) {

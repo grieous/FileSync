@@ -1857,7 +1857,14 @@ window.__ModuleLoader__.load({
         }
         if (pair.state === 'connecting') return '后台服务正在连中继，一两秒后会有结果。'
         if (pair.state === 'denied') {
-          return '中继开了房间级密钥（SYNC_ROOM_TOKENS）时，配对通道也得放行：'
+          // 原话照抄：出问题时要的是能贴给我的原文，不是被我改写过的解释
+          const said = String(pair.error ?? '').trim()
+          const quoted = said ? `中继回的是「${said}」。` : ''
+          if (/房间已满|仅支持 2 台|2 端/.test(said)) {
+            return `${quoted}这个配对房间里已经有 2 个连接（中继一间只容 2 端）：`
+              + '把多余的那个向导/窗口关掉，或换一组 6 位通道码重新配。'
+          }
+          return `${quoted}中继开了房间级密钥（SYNC_ROOM_TOKENS）时，配对通道也得放行：`
             + '给 SYNC_ROOMS 加一条 "*" 兜底密钥，或关掉房间级密钥。'
         }
         if (pair.state === 'unreachable') {
@@ -2118,6 +2125,10 @@ window.__ModuleLoader__.load({
                     : pairTitle(),
             ),
             h('div', { className: 'ws-hint' }, pairHint()),
+            // 两端对不对得上，最直接的证据就是这行：房间名不一样 = 进的不是同一间
+            channelReady
+              ? h('div', { className: 'ws-hint ws-mono' }, `配对房间 ${channel}::pair（两端这里必须一样）`)
+              : null,
             !paired && !everPaired && !pairBroken
               ? h(
                   'button',

@@ -1,7 +1,7 @@
-WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.4 / 中继 0.5）
+WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.5 / 中继 exe 0.6（Docker 镜像仍是 0.5））
 
 一、只装 dsh 插件（Windows，推荐）
-  dsh plugin --profile desktop add "本目录\dsh-winsync-0.8.4.tgz"
+  dsh plugin --profile desktop add "本目录\dsh-winsync-0.8.5.tgz"
   重启 dsh → 左侧栏「文件同步」。
   插件包里自带 daemon（bin/winsync-daemon.exe.gz，首次运行展开到
   %LOCALAPPDATA%\dsh-winsync\bin），不需要另外放文件。
@@ -34,7 +34,10 @@ WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.4 / 中继 0.5）
   2. 开放配对（默认，靠随机房间码保密）：
        docker run -d --name winsync-relay -p 18443:8443 --restart=always \
          -e SYNC_RATE_LIMIT=30 winsync-relay:0.5
-  3. 需要固定口令时，加 -e SYNC_ROOM_TOKENS='{"default":"你的密钥","*":"你的密钥"}'
+  3. 想让中继把「拒绝进入房间」的原因（房间已满等）说清楚，镜像需要重建（0.5 版是静默断开）：
+       cd 仓库 && docker build -f sync/deploy/Dockerfile -t winsync-relay:0.6 .
+     旧镜像仍可用，只是房间满时客户端只看到「连接被断开」。
+  4. 需要固定口令时，加 -e SYNC_ROOM_TOKENS='{"default":"你的密钥","*":"你的密钥"}'
      注意：配了房间级密钥就是逐房间校验，配对通道（通道码::pair）也得放行，
      否则第一步永远连不上——加一条 "*" 兜底密钥最省事。
 
@@ -53,7 +56,7 @@ WinSync / dsh-winsync 发布包（2026-11-24，插件 0.8.4 / 中继 0.5）
   被拒（10061）才是端口没人监听（中继没起或端口映射不对）。
 
 五、文件
-  dsh-winsync-0.8.4.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
+  dsh-winsync-0.8.5.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
   winsync-relay.exe            Windows 中继（免 Docker；SYNC_ADDR 指定监听地址）
   winsync-relay-0.5.tar.gz     中继镜像（docker load 导入，Linux 用）
   winsync-daemon.exe           单独一份 daemon（备用；插件包内已有）

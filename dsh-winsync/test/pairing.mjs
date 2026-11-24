@@ -305,7 +305,9 @@ assert.match(text(), /正在等对方/, '等待对端时没给出明确文案')
 assert.equal(nextButton().disabled, true, '还没配上时不能往下走')
 assert.match(nextButton().title, /配对/, '禁用原因没写在 title 上')
 assert.ok(byText('.ws-link', '先建我这边'), '缺少「对方已建任务」的显式出口')
-console.log('PASS 等待对端时拦住下一步，并给出显式出口')
+// 两端对不对得上，就看这行房间名
+assert.match(text(), new RegExp(`配对房间 ${channel}::pair`), '没显示配对房间名，两端没法对比')
+console.log('PASS 等待对端时拦住下一步，给出显式出口，并显示配对房间名')
 
 /* 5. 对端进来 → 配对通过，通道码置灰锁死，下一步放行 */
 
@@ -341,6 +343,13 @@ assert.match(text(), /中继拒绝了配对通道/, '被 401 时没有明确指�
 assert.equal(nextButton().disabled, true, '配置被中继拒绝时应当拦住「下一步」')
 assert.match(nextButton().title, /SYNC_ROOMS|密钥/, '禁用原因没写在 title 上')
 console.log('PASS 401 明确指出配对通道被拒，并拦住下一步')
+
+// 中继的 Bye（房间满）必须原样露出来，不能被当成普通掉线无限重连
+await applyPresence({ state: 'denied', error: '房间已满：本版本仅支持 2 台设备' })
+assert.match(text(), /房间已满/, '中继说房间满时没把原话显示出来')
+assert.match(text(), /关掉|通道码/, '房间满时没给处理办法')
+assert.equal(nextButton().disabled, true, '房间满时不该放行')
+console.log('PASS 中继 Bye「房间已满」原样显示，并给出处理办法')
 
 /* 8. 连不上 → 同样拦住，并提示检查端口 */
 

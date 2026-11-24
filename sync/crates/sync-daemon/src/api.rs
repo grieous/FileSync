@@ -1102,28 +1102,55 @@ async fn presence_loop(gen: u64, url: String, room: String, server: String, devi
                     }
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) => {
-                            if let Ok(WireFrame::Control(Msg::PeerStatus {
-                                peer_online,
-                                peer_device_id,
-                            })) = WireFrame::decode(&data)
-                            {
-                                presence_set(gen, |s| {
-                                    s.state = if peer_online { "paired" } else { "waiting" };
-                                    s.peer = if peer_online {
-                                        peer_device_id.unwrap_or_default()
-                                    } else {
-                                        String::new()
-                                    };
-                                    if peer_online {
-                                        s.error.clear();
-                                    }
-                                });
+                            match WireFrame::decode(&data) {
+                                Ok(WireFrame::Control(Msg::PeerStatus {
+                                    peer_online,
+                                    peer_device_id,
+                                })) => {
+                                    presence_set(gen, |s| {
+                                        s.state = if peer_online { "paired" } else { "waiting" };
+                                        s.peer = if peer_online {
+                                            peer_device_id.unwrap_or_default()
+                                        } else {
+                                            String::new()
+                                        };
+                                        if peer_online {
+                                            s.error.clear();
+                                        }
+                                    });
+                                }
+                                // 中继主动赶客（房间满、同设备顶号…）会发 Bye。
+                                // 以前这里直接当「掉线」忽略，于是「房间已满」被藏起来，
+                                // 界面上只剩无限重连的「正在等对方」——最难查的那类。
+                                Ok(WireFrame::Control(Msg::Bye { reason })) => {
+                                    presence_set(gen, |s| {
+                                        s.state = "denied";
+                                        s.peer.clear();
+                                        s.error = if reason.trim().is_empty() {
+                                            "中继关闭了这条配对连接".to_string()
+                                        } else {
+                                            reason
+                                        };
+                                    });
+                                    break;
+                                }
+                                _ => {}
                             }
                         }
                         Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
                         Ok(_) => {}
                         Err(_) => break,
                     }
+                }
+
+                // 被中继明确拒绝（房间满之类）就别 1.2 秒一次地撞门，慢一点等用户处理
+                let rejected = match presence_slot().lock() {
+                    Ok(s) => s.gen == gen && s.state == "denied",
+                    Err(_) => false,
+                };
+                if rejected {
+                    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+                    continue;
                 }
 
                 // 掉线：从「已配对」退回「等待」，然后重连
@@ -1155,14 +1182,16 @@ async fn presence_start(Json(body): Json<ProbeInput>) -> ApiResult {
     } else {
         presented.to_string()
     };
-    // 每次配对换一个 device id：中继遇到同 id 会踢掉旧连接，换掉才不会误伤上一次的。
-    // 后面拼的 `~<hex>` 是给对端看的配置（见 `ProbeInput::announce`）。
-    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    // device id 在整个 daemon 生命周期里固定：中继遇到同 id 会踢掉旧连接，
+    // 于是「上一次没退干净的那条连接」会被自动顶掉，不会把房间占到满——对端就是被这个挡在门外的。
+    // 载荷每次随配置变，但 id 不变，顶号才生效。
+    static BASE_ID: OnceLock<String> = OnceLock::new();
+    let base = BASE_ID.get_or_init(|| format!("ui-{}", uuid::Uuid::new_v4().simple()));
     let announce = body.announce.trim();
     let device = if announce.is_empty() {
-        format!("ui-{nonce}")
+        base.clone()
     } else {
-        format!("ui-{nonce}~{}", hex_of(announce))
+        format!("{base}~{}", hex_of(announce))
     };
     let cfg = Config {
         server: server.clone(),
