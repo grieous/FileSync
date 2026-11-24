@@ -85,7 +85,11 @@ impl Runtime {
 
 struct EditBuf {
     name: String,
-    server: String,
+    /// 中继地址分两栏：IP 与端口分开填，拼成 URL 的活交给 compose_server
+    host: String,
+    port: String,
+    /// 房间码默认打码：它是门禁，不该随手出现在截屏里
+    reveal_room: bool,
     token: String,
     workspace: String,
     root: String,
@@ -100,7 +104,9 @@ impl EditBuf {
     fn from_task(t: &Config) -> Self {
         Self {
             name: t.name.clone(),
-            server: t.server.clone(),
+            host: split_server(&t.server).0,
+            port: split_server(&t.server).1,
+            reveal_room: false,
             token: t.token.clone(),
             workspace: t.workspace.clone(),
             root: t.root.clone(),
@@ -136,7 +142,7 @@ impl EditBuf {
 
     fn apply_to(&self, t: &mut Config) {
         t.name = self.name.trim().to_string();
-        t.server = self.server.trim().to_string();
+        t.server = compose_server(&self.host, &self.port);
         t.token = self.token.trim().to_string();
         t.workspace = self.workspace.trim().to_string();
         t.root = self.root.trim().to_string();
@@ -148,7 +154,9 @@ impl EditBuf {
 /// 新建任务向导：1 同步设备 → 2 规则设置 → 3 同步路径（与飞牛同步一致）
 struct Wizard {
     step: u8,
-    server: String,
+    host: String,
+    port: String,
+    reveal_room: bool,
     token: String,
     workspace: String,
     mode: SyncMode,
@@ -163,11 +171,14 @@ impl Wizard {
     fn new(seed: Option<&Config>) -> Self {
         Self {
             step: 0,
-            server: seed.map(|t| t.server.clone()).unwrap_or_else(|| "ws://".into()),
+            host: seed.map(|t| split_server(&t.server).0).unwrap_or_default(),
+            port: seed.map(|t| split_server(&t.server).1).unwrap_or_default(),
+            reveal_room: false,
             token: seed.map(|t| t.token.clone()).unwrap_or_default(),
+            // 没沿用旧任务就自动生成房间码：不用起名字，也不用去中继登记（与插件一致）
             workspace: seed
                 .map(|t| t.workspace.clone())
-                .unwrap_or_else(|| "default".into()),
+                .unwrap_or_else(new_room_code),
             mode: SyncMode::Bidirectional,
             dotfiles: false,
             ext: String::new(),
@@ -181,7 +192,7 @@ impl Wizard {
         let mut t = Config {
             id: new_id(),
             name: self.name.trim().to_string(),
-            server: self.server.trim().to_string(),
+            server: compose_server(&self.host, &self.port),
             token: self.token.trim().to_string(),
             workspace: if self.workspace.trim().is_empty() {
                 "default".into()
@@ -1229,7 +1240,12 @@ impl App {
             let host = short_server(&t.server);
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("🖥  {}  |  {}  ·  房间 {}", computer_name(), host, t.workspace))
+                    egui::RichText::new(format!(
+                        "🖥  {}  |  {}  ·  房间 {}",
+                        computer_name(),
+                        host,
+                        short_room(&t.workspace)
+                    ))
                         .size(12.0)
                         .color(ui_colors::TEXT_2),
                 );
@@ -1401,7 +1417,7 @@ impl App {
                                     egui::RichText::new(format!(
                                         "{} / {}",
                                         short_server(&task.server),
-                                        task.workspace
+                                        short_room(&task.workspace)
                                     ))
                                     .size(12.0)
                                     .color(ui_colors::TEXT),
@@ -1969,11 +1985,17 @@ impl App {
             .show(ctx, |ui| {
                 field(ui, "任务名", &mut self.buf.name, "留空则用目录名", false);
                 ui.add_space(8.0);
-                field(ui, "服务器地址", &mut self.buf.server, "ws://192.168.3.222:18443/ws", false);
+                relay_fields(ui, &mut self.buf.host, &mut self.buf.port);
                 ui.add_space(8.0);
-                field(ui, "密钥", &mut self.buf.token, "与服务端 SYNC_TOKEN 一致", true);
+                room_field(ui, &mut self.buf.workspace, &mut self.buf.reveal_room);
                 ui.add_space(8.0);
-                field(ui, "房间（两台设备必须相同）", &mut self.buf.workspace, "default", false);
+                field(
+                    ui,
+                    "密钥",
+                    &mut self.buf.token,
+                    "留空则与房间码相同（中继配了房间密钥才需要填）",
+                    true,
+                );
                 ui.add_space(8.0);
 
                 ui.label(
@@ -2248,18 +2270,26 @@ impl App {
                         .color(ui_colors::TEXT),
                 );
                 ui.add_space(10.0);
-                field(ui, "服务器地址", &mut w.server, "ws://192.168.3.222:18443/ws", false);
+                relay_fields(ui, &mut w.host, &mut w.port);
                 ui.add_space(10.0);
-                field(ui, "密钥", &mut w.token, "与服务端 SYNC_TOKEN 一致", true);
+                room_field(ui, &mut w.workspace, &mut w.reveal_room);
                 ui.add_space(10.0);
-                field(ui, "房间（两台设备必须相同）", &mut w.workspace, "default", false);
+                field(
+                    ui,
+                    "密钥",
+                    &mut w.token,
+                    "留空则与房间码相同（中继配了房间密钥才需要填）",
+                    true,
+                );
                 if let Some(t) = self.settings.tasks.first() {
                     ui.add_space(12.0);
                     if ui
                         .button(format!("沿用「{}」的连接", t.display_name()))
                         .clicked()
                     {
-                        w.server = t.server.clone();
+                        let (host, port) = split_server(&t.server);
+                        w.host = host;
+                        w.port = port;
                         w.token = t.token.clone();
                         w.workspace = t.workspace.clone();
                     }
@@ -2343,7 +2373,7 @@ impl App {
                             "{}  ⇄  {} · 房间 {}",
                             t.root,
                             short_server(&t.server),
-                            t.workspace
+                            short_room(&t.workspace)
                         ))
                         .size(12.0)
                         .color(ui_colors::TEXT_2),
@@ -2522,6 +2552,59 @@ fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(6.0);
 }
 
+/// `ws://10.90.45.64:10023/ws` → ("10.90.45.64", "10023")；没写端口就留空（交给 8443 兜底）。
+fn split_server(server: &str) -> (String, String) {
+    let raw = server.trim();
+    let rest = raw
+        .strip_prefix("ws://")
+        .or_else(|| raw.strip_prefix("wss://"))
+        .unwrap_or(raw);
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() {
+        return (String::new(), String::new());
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+            (host.to_string(), port.to_string())
+        }
+        _ => (authority.to_string(), String::new()),
+    }
+}
+
+/// 两栏拼回 daemon 认的整条地址；端口留空按 8443（daemon 的默认端口）。
+fn compose_server(host: &str, port: &str) -> String {
+    let host = host.trim();
+    if host.is_empty() {
+        return String::new();
+    }
+    let digits: String = port
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .take(5)
+        .collect();
+    if digits.is_empty() {
+        format!("ws://{host}:8443/ws")
+    } else {
+        format!("ws://{host}:{digits}/ws")
+    }
+}
+
+/// 卡片上只露前 8 位：整串 33 位会把一行顶爆，完整值在设置里看。
+fn short_room(room: &str) -> String {
+    let chars: Vec<char> = room.chars().collect();
+    if chars.len() > 12 {
+        format!("{}…", chars[..8].iter().collect::<String>())
+    } else {
+        room.to_string()
+    }
+}
+
+/// 房间码：`k` + 32 位十六进制，和 dsh 插件生成的同构——32 位随机、猜不到就是门禁。
+fn new_room_code() -> String {
+    format!("k{}", uuid::Uuid::new_v4().simple())
+}
+
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, password: bool) {
     ui.label(
         egui::RichText::new(label)
@@ -2535,6 +2618,76 @@ fn field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, passwor
         edit = edit.password(true);
     }
     ui.add(edit);
+}
+
+/// 中继地址两栏：IP 与端口分开填，省得手打 `ws://…/ws`（与 dsh 插件一致）。
+fn relay_fields(ui: &mut egui::Ui, host: &mut String, port: &mut String) {
+    ui.label(egui::RichText::new("中继地址").size(12.0).color(ui_colors::TEXT_2));
+    ui.horizontal(|ui| {
+        let host_resp = ui.add(
+            egui::TextEdit::singleline(host)
+                .hint_text("10.90.45.64")
+                .desired_width(250.0),
+        );
+        // 整条地址粘进 IP 栏也认：带冒号或斜杠就自动拆到两栏
+        if host_resp.changed() && (host.contains(':') || host.contains('/')) {
+            let (h, p) = split_server(host);
+            *host = h;
+            if !p.is_empty() {
+                *port = p;
+            }
+        }
+        let resp = ui.add(
+            egui::TextEdit::singleline(port)
+                .hint_text("端口 8443")
+                .desired_width(110.0),
+        );
+        // 端口只收数字：粘贴整条地址时别把 `ws://` 也塞进来
+        if resp.changed() {
+            let digits: String = port
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .take(5)
+                .collect();
+            if digits != *port {
+                *port = digits;
+            }
+        }
+    });
+    ui.label(
+        egui::RichText::new("端口填 docker -p 左边那个（-p 10023:8443 就是 10023）；留空按 8443")
+            .size(11.0)
+            .color(ui_colors::TEXT_3),
+    );
+}
+
+/// 房间码：自动生成、默认打码，和插件的「高级配置」同一个口径。
+fn room_field(ui: &mut egui::Ui, value: &mut String, reveal: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("房间码（两端必须相同）")
+                .size(12.0)
+                .color(ui_colors::TEXT_2),
+        );
+        if ui.small_button(if *reveal { "隐藏" } else { "显示" }).clicked() {
+            *reveal = !*reveal;
+        }
+        if ui.small_button("换一个").clicked() {
+            *value = new_room_code();
+        }
+    });
+    let mut edit = egui::TextEdit::singleline(value)
+        .hint_text("自动生成")
+        .desired_width(420.0);
+    if !*reveal {
+        edit = edit.password(true);
+    }
+    ui.add(edit);
+    ui.label(
+        egui::RichText::new("32 位随机码，默认隐藏；两台填同一个房间码才是同一间房")
+            .size(11.0)
+            .color(ui_colors::TEXT_3),
+    );
 }
 
 fn mode_short(m: SyncMode) -> &'static str {

@@ -54,7 +54,13 @@ WinSync / dsh-winsync 发布包（2026-11-24，插件 0.9.0 / 中继 0.6）
   3. 两端都能连上中继却配不上对：看两端卡片上的「配对房间 xxxxxx::pair」是否一致，
      再在中继上 `docker logs -f winsync-relay` 看「加入 / 配对成功 / 房间已满」。
 
-五、文件
+五、exe 程序（不装 dsh 也能用）
+  界面与插件对齐：中继地址分 IP / 端口两栏（端口留空按 8443，整条地址粘进 IP 栏会自动拆开）、
+  房间码自动生成 32 位、默认打码（点「显示」查看、「换一个」重生成）、密钥留空即跟随房间码；
+  任务卡上的进度条按字节走，右边是实时速率（↑ 上传 / ↓ 下载）。
+  还没做：插件第一步那个「6 位通道码配对」——exe 目前靠两端填同一个房间码对齐，不握手。
+
+六、文件
   dsh-winsync-0.9.0.tgz        插件包（lib/* + bin/winsync-daemon.exe.gz）——装 dsh 只需要这一个
   winsync-relay-0.6.tar.gz     中继镜像（Linux/amd64，docker load -i 导入；1.2 MB，无基础镜像）
   Dockerfile.relay             上面那个镜像的「一条命令重建」版（FROM scratch + 静态二进制，3 秒）
